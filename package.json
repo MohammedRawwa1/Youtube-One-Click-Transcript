@@ -5,6 +5,7 @@
   "description": "Browser extension: copy a YouTube video's transcript with one click (Manifest V3, no build step)",
   "scripts": {
     "test": "node test/test_capfetch.mjs && node test/test_navigation.mjs && node test/test_collector.mjs && node test/test_chunks.mjs && node test/test_arabic.mjs && node test/perf_collector.mjs",
-    "check": "node --check content.js && node -e \"JSON.parse(require('fs').readFileSync('manifest.json','utf8'))\" && echo OK"
+    "check": "node --check content.js && node -e \"JSON.parse(require('fs').readFileSync('manifest.json','utf8'))\" && echo OK",
+    "check:layout": "node tools/check-badge-layout.mjs"
   }
 }

@@ -28,6 +28,11 @@ function check(name, cond, detail) {
 }
 
 const arabicIndic = (s) => String(s).replace(/[0-9]/g, (d) => "٠١٢٣٤٥٦٧٨٩"[+d]);
+// Intl inserts invisible marks into RTL number formatting - an Arabic letter
+// mark after a percent sign, so the sign cannot be reordered against the number
+// - and a bidi control is not what an assertion should be about. Stripped for
+// display comparisons only: the values themselves keep their marks.
+const visibleText = (s) => String(s).replace(/[\u061c\u200e\u200f]/g, "");
 const persianIndic = (s) => String(s).replace(/[0-9]/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[+d]);
 
 // =========================================================
@@ -128,9 +133,8 @@ const numbersSrc = extract(
 const uiSrc = extract(
   "  // =========================================================\n  // UI STRINGS",
   "\n\n  // =========================================================\n  // PAGE DATA"
-);
-const buildUi = ({ lang = "en", navLang = undefined, ui = null, override = null, custom = null } = {}) =>
-  new Function("document", "navigator", "localStorage", `${numbersSrc}\n${uiSrc}\n    return { t, countText };`)(
+);const buildUi = ({ lang = "en", navLang = undefined, ui = null, override = null, custom = null } = {}) =>
+  new Function("document", "navigator", "localStorage", `${numbersSrc}\n${uiSrc}\n    return { t, countText, percentText };`)( 
     // A null <html lang> exercises the navigator fallback.
     { documentElement: lang ? { getAttribute: () => lang } : null },
     { language: navLang === undefined ? lang || undefined : navLang },
@@ -408,11 +412,14 @@ const track = (baseUrl, languageCode, kind) => (kind ? { baseUrl, languageCode, 
 // =========================================================
 {
   const chunksSrc = extract("  function buildChunks(", "\n\n  // =========================================================\n  // FALLBACK: CAPTION SOURCES");
-  const buildChunks = new Function("CHUNK_MAX_CHARS", `return (${chunksSrc});`)(50);
+  // The cap is an argument now: each node (the main button, a chapter badge)
+  // passes its own. A small one here keeps the fixture tiny.
+  const buildChunks = new Function(`${chunksSrc}\n    return { buildChunks };`)().buildChunks;
+  const CAP = 50;
   const LRI = "\u2066", PDI = "\u2069";
 
   const arabicRows = Array.from({ length: 8 }, (_, i) => ({ t: i * 5, txt: "كلمة" + i + "ا".repeat(12) }));
-  const arabicChunks = buildChunks([{ title: "المقدمة", start: 0, end: 600 }], arabicRows);
+  const arabicChunks = buildChunks({ title: "المقدمة", start: 0, end: 600 }, arabicRows, CAP);
   check("an Arabic chapter is split into parts", arabicChunks.length > 1, `got ${arabicChunks.length}`);
   check(
     "the part marker is isolated so bidi cannot reorder it into the title",
@@ -443,25 +450,25 @@ const track = (baseUrl, languageCode, kind) => (kind ? { baseUrl, languageCode, 
   check("every part body stays under the cap", arabicChunks.every((c) => c.text.replace(/^.*\n/, "").length <= 50), JSON.stringify(arabicChunks.map((c) => c.text.length)));
 
   // Hebrew is RTL too, and Latin titles must stay byte-identical to before.
-  const hebrew = buildChunks([{ title: "פרק", start: 0, end: 600 }], Array.from({ length: 8 }, (_, i) => ({ t: i * 5, txt: "מילה" + i + "א".repeat(12) })));
+  const hebrew = buildChunks({ title: "פרק", start: 0, end: 600 }, Array.from({ length: 8 }, (_, i) => ({ t: i * 5, txt: "מילה" + i + "א".repeat(12) })), CAP);
   check("a Hebrew title is isolated as well", hebrew.every((c) => c.title.includes(LRI) && c.title.includes(PDI)), JSON.stringify(hebrew.map((c) => c.title)));
 
   const latinRows = Array.from({ length: 8 }, (_, i) => ({ t: i * 5, txt: "word" + i + "x".repeat(12) }));
-  const latin = buildChunks([{ title: "Solo", start: 0, end: 600 }], latinRows);
+  const latin = buildChunks({ title: "Solo", start: 0, end: 600 }, latinRows, CAP);
   check(
     "a Latin title is byte-identical to the old format (no isolate added)",
     latin.every((c) => !c.title.includes(LRI) && !c.title.includes(PDI) && /^Solo \(part \d+\/\d+\)$/.test(c.title)),
     JSON.stringify(latin.map((c) => c.title))
   );
-  const untitled = buildChunks([{ title: "", start: 0, end: Infinity }], latinRows);
+  const untitled = buildChunks({ title: "", start: 0, end: Infinity }, latinRows, CAP);
   check(
     "an untitled span is still numbered by position, with no controls",
     untitled.every((c, i) => c.title === `Part ${i + 1}/${untitled.length}`),
     JSON.stringify(untitled.map((c) => c.title))
   );
-  const one = buildChunks([{ title: "Solo", start: 0, end: 600 }], latinRows.slice(0, 2));
+  const one = buildChunks({ title: "Solo", start: 0, end: 600 }, latinRows.slice(0, 2), CAP);
   check("a chapter that fits one chunk is still a plain title line", one.length === 1 && one[0].text.startsWith("Solo\n"), JSON.stringify(one[0].text));
-  const arabicOne = buildChunks([{ title: "المقدمة", start: 0, end: 600 }], arabicRows.slice(0, 2));
+  const arabicOne = buildChunks({ title: "المقدمة", start: 0, end: 600 }, arabicRows.slice(0, 2), CAP);
   check("an Arabic chapter that fits keeps its bare title line", arabicOne.length === 1 && arabicOne[0].text.startsWith("المقدمة\n"), JSON.stringify(arabicOne[0].text));
   check(
     "a copy with no part marker carries no bidi controls at all",
@@ -768,12 +775,35 @@ const track = (baseUrl, languageCode, kind) => (kind ? { baseUrl, languageCode, 
   const unknown = makeCounter({ lang: "xx-YY" });
   check("an unknown locale does not throw", typeof unknown.countText(2, 5) === "string" && unknown.countText(2, 5).includes("/"), unknown.countText(2, 5));
 
+  // The share shown while stepping through the parts of a long transcript is
+  // chrome like the counts, so it follows the same numbering system AND takes
+  // the locale's own percent sign ("٪", not "%").
+  check("an Arabic page shows the share in Arabic-Indic digits", visibleText(ar.percentText(11)) === "١١٪", visibleText(ar.percentText(11)));
+  check("an English page keeps ASCII digits and sign", en.percentText(11) === "11%", en.percentText(11));
+  // Locale typography comes along: German spaces the sign (with a no-break
+  // space, per CLDR), so the space is tolerated rather than pinned.
+  const german = makeCounter({ lang: "de-DE" }).percentText(11);
+  check("a German page keeps ASCII digits, with its own spacing", /^11[\s\u00a0]%$/.test(german), JSON.stringify(german));
+  check(
+    "a Persian page gets Persian-Indic digits",
+    visibleText(makeCounter({ lang: "fa" }).percentText(11)).startsWith("۱۱"),
+    visibleText(makeCounter({ lang: "fa" }).percentText(11))
+  );
+  check("the Maghreb keeps Latin digits (region wins over the language pin)", visibleText(makeCounter({ lang: "ar-MA" }).percentText(11)) === "11%", visibleText(makeCounter({ lang: "ar-MA" }).percentText(11)));
+  check(
+    "ytxt_numerals=latn forces ASCII here too",
+    visibleText(makeCounter({ lang: "ar-EG", override: "latn" }).percentText(11)) === "11%",
+    visibleText(makeCounter({ lang: "ar-EG", override: "latn" }).percentText(11))
+  );
+  check("the share reads as a whole percent, not a fraction", en.percentText(41.4) === "41%", en.percentText(41.4));
+  check("a non-number degrades to nothing instead of throwing", en.percentText("nope") === "", JSON.stringify(en.percentText("nope")));
+
   // Localizing chrome must not localize content: the copied part markers, which
   // users grep for, stay ASCII on an Arabic page too.
   const chunkSrc = extract("  function buildChunks(", "\n\n  // =========================================================\n  // FALLBACK: CAPTION SOURCES");
-  const build = new Function("CHUNK_MAX_CHARS", `return (${chunkSrc});`)(50);
+  const build = new Function(`${chunkSrc}\n    return { buildChunks };`)().buildChunks;
   const rows = Array.from({ length: 8 }, (_, i) => ({ t: i * 5, txt: "كلمة" + i + "ا".repeat(12) }));
-  const chunkTitles = build([{ title: "المقدمة", start: 0, end: 600 }], rows).map((c) => c.title.replace(/[\u2066\u2069]/g, ""));
+  const chunkTitles = build({ title: "المقدمة", start: 0, end: 600 }, rows, 50).map((c) => c.title.replace(/[\u2066\u2069]/g, ""));
   check("copied part markers stay ASCII even on an Arabic page", chunkTitles.every((t) => /\(part \d+\/\d+\)$/.test(t)), JSON.stringify(chunkTitles));
   check("and carry no Arabic-Indic or Persian-Indic digits", chunkTitles.every((t) => !/[٠-٩۰-۹]/.test(t)), JSON.stringify(chunkTitles));
 }
@@ -789,7 +819,27 @@ const track = (baseUrl, languageCode, kind) => (kind ? { baseUrl, languageCode, 
 
   const ar = buildUi({ ui: "ar" });
   check("ytxt_ui=ar translates the main button", ar.t("button.idle") === "📜 النص", ar.t("button.idle"));
-  check("...the chunk labels, around localized digits", ar.t("badge.chunkNext", { count: ar.countText(2, 3) }) === "⏭٢/٣", ar.t("badge.chunkNext", { count: ar.countText(2, 3) }));
+  check(
+    "...the chunk labels, around localized digits",
+    visibleText(ar.t("badge.chunkNext", { count: ar.countText(2, 3), pct: ar.percentText(11) })) === "⏭٢/٣ · ١١٪",
+    visibleText(ar.t("badge.chunkNext", { count: ar.countText(2, 3), pct: ar.percentText(11) }))
+  );
+  check(
+    "...the share in the main button's label",
+    visibleText(ar.t("button.chunkNext", { count: ar.countText(2, 3), pct: ar.percentText(11) })) === "⏭ نسخ ٢/٣ · ١١٪",
+    visibleText(ar.t("button.chunkNext", { count: ar.countText(2, 3), pct: ar.percentText(11) }))
+  );
+  check(
+    "...and the tooltip's progress sentence",
+    visibleText(ar.t("chunk.progress", { pct: ar.percentText(11) })) === "تم نسخ ١١٪ من النص حتى الآن.",
+    visibleText(ar.t("chunk.progress", { pct: ar.percentText(11) }))
+  );
+  check(
+    "an English build says the same thing in ASCII",
+    en.t("button.chunkNext", { count: en.countText(2, 3), pct: en.percentText(11) }) === "⏭ Copy 2/3 · 11%" &&
+      en.t("chunk.progress", { pct: en.percentText(11) }) === "11% of the transcript copied so far.",
+    en.t("button.chunkNext", { count: en.countText(2, 3), pct: en.percentText(11) })
+  );
   check("...the overlay chrome", ar.t("debug.copy") === "📋 نسخ التقرير" && ar.t("debug.closeTip") === "إخفاء نافذة التصحيح", `${ar.t("debug.copy")} / ${ar.t("debug.closeTip")}`);
   check("...and the alerts, which is what a failed copy shows", ar.t("error.noRange") === "لا يوجد نص لهذا النطاق من الفصل." && ar.t("error.captionSources") === "فشلت جميع مصادر الترجمة:", `${ar.t("error.noRange")} / ${ar.t("error.captionSources")}`);
   check(

@@ -54,10 +54,10 @@
   opacity: 0.75;
 }
 
-/* While a chunk session is driving the badge its label is an "n/N" count, which
-   does not fit a 22px circle - the digits would spill out over the chapter
-   title. The class (added by setChunkLabel(), removed by resetMainButton())
-   grows the circle into a pill wide enough for the count. */
+/* While a chunk session is driving the badge its label is an "n/N" count - and,
+   from the second part on, the share of the transcript already copied - which
+   does not fit a 22px circle. The class (added by setChunkLabel(), removed by
+   resetMainButton()) grows the circle into a pill wide enough for the label. */
 .my-yt-chapter-copy.my-yt-chunking {
   width: auto;
   min-width: 22px;
@@ -65,6 +65,25 @@
   border-radius: 11px;
   font-size: 10px;
   white-space: nowrap;
+}
+
+/* The badge is absolutely positioned, so a pill does not push the chapter title
+   aside - it lands on top of it, and the end of a long title is exactly where it
+   would land. The row therefore reserves the room the pill is actually taking:
+   reserveBadgeRoom() measures the rendered badge and sets both the class and
+   --my-yt-badge-room, and the padding is applied to the row's content box only,
+   so the badge keeps its own 6px inset while the title can no longer run under
+   it.
+
+   Applied to the rows whose badge sits BESIDE the title: the classic description
+   rows and the horizontal chapter-list items. It is deliberately not applied to
+   three other cases: a VERTICAL chapter card keeps its badge over the thumbnail
+   with the title below it, so reserving inline room there would only squeeze the
+   card; the chapter shelf's cards are all of that kind; and the player's badge
+   shares a flex row with the chapter title, which reflows on its own. */
+ytd-video-description-chapter-thumbnail-renderer.my-yt-chapter-pill,
+ytd-macro-markers-list-item-renderer.my-yt-chapter-pill:not([layout*="VERTICAL"]) {
+  padding-inline-end: var(--my-yt-badge-room);
 }
 
 /* Modern chapter cards are vertical (thumbnail on top), so anchor the

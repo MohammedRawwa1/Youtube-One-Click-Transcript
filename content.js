@@ -107,6 +107,16 @@
   const BUTTON_ID = "my-yt-transcript-button";
   const CHAPTER_BTN_CLS = "my-yt-chapter-copy";
   const CHAPTER_HAS_BTN = "my-yt-chapter-has-btn";
+  // Set on a chapter row while its badge is a pill (a count, or a count and the
+  // share copied), so the row can reserve the room the pill takes. content.css
+  // turns the class into `padding-inline-end: var(BADGE_ROOM_VAR)`; the width is
+  // measured off the rendered badge (see reserveBadgeRoom) because it depends on
+  // the label, the digit set and the font.
+  const BADGE_PILL_CLS = "my-yt-chapter-pill";
+  const BADGE_ROOM_VAR = "--my-yt-badge-room";
+  // Between the pill and the text it must not touch: the badge's own 6px inset
+  // (content.css) plus a little air.
+  const BADGE_ROOM_GAP = 10;
   const PLAYER_BTN_ID = "my-yt-player-chapter-btn";
   const DEBUG_OVERLAY_ID = "my-yt-debug-overlay";
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -121,23 +131,34 @@
   // ensureFreshTranscriptPanel().
   let panelRowsAtNav = null;
 
-  // Full-transcript copies longer than this are split into per-chapter
-  // clipboard copies (one chunk per click) when the video has chapters.
-  // 500k was still too eager at the long end: a 19-hour lecture or stream is
-  // commonly only a little over 1M characters, so at 500k a chaptered course
-  // was cut into one piece per chapter (100+ clicks) instead of being copied
-  // whole. 1M characters is ~2 MB as UTF-16 - a couple of megabytes is
-  // nothing to hold or write, on a desktop or on a phone browser running an
-  // extension - so the cutoff sits where a single write really is a problem,
-  // rather than at a fixed fraction of it.
-  const CHUNK_THRESHOLD = 1000000; // characters
-  // When chunk mode is active, no single copied chunk may exceed this many
-  // characters: an oversized chapter (e.g. one 3h chapter inside a stream)
-  // is split into ~CHUNK_MAX_CHARS pieces at segment boundaries so every
-  // clipboard write stays manageable.
+  // TWO INDEPENDENT BATCHERS, each with its own unit of work and its own size
+  // numbers. Neither may borrow the other's constants:
+  //
+  //   * the main Transcript button is a batch service over the WHOLE video. It
+  //     never consults the chapter list and never labels a part with a chapter
+  //     title - its only unit is the transcript itself, so a 19-hour chaptered
+  //     video batches by size exactly like a chapterless one.
+  //   * every chapter (and the player badge for the chapter playing right now)
+  //     is its own parent node: it batches its own chapter and nothing else.
+  //
+  // The ONLY number this file imposes is the ceiling below: the most that may
+  // go into one clipboard write. How a copy is divided into parts is NOT a
+  // constant - it is derived from the rows the caption source actually
+  // returned (see splitRowsIntoParts), so any transcript, whatever its size,
+  // can be batched without a fixed target to hit.
+  //
+  // ---- main Transcript button ----
+  // Above this many characters a whole-video copy is split into ordered parts
+  // instead of being written in one go. Kept equal to the ceiling: past the
+  // ceiling a single write is no longer safe, and below it splitting would
+  // only cost the user extra clicks.
+  const MAIN_CHUNK_THRESHOLD = 1000000; // characters
+  // When the main button's batch mode is active, no single copied part may
+  // exceed this many characters: the transcript is divided at segment
+  // boundaries so every clipboard write stays manageable.
   //
   // How this number was chosen - the clipboard is NOT the constraint, so the
-  // cap is set from the weakest link in this file instead of from clipboard
+  // ceiling is set from the weakest link in this file instead of from clipboard
   // limits:
   //  - Chromium caps clipboard data at 256 MiB (kMaxClipboardSize in
   //    ui/base/clipboard/clipboard_win.cc, crbug.com/1164680) but applies it to
@@ -162,14 +183,19 @@
   // value is bounded by memory rather than by the clipboard, and extensions
   // load on phones too (Firefox for Android, Kiwi and friends), where the
   // async clipboard path is the same API - a couple of megabytes is fine to
-  // hold and write there. The win is real: a 19h transcript just over 500k
-  // characters went from a chunk per chapter to a single copy. Chunks are one
-  // per chapter, so this only decides when a single long chapter is split.
+  // hold and write there.
   //
-  // Kept equal to CHUNK_THRESHOLD, and never above it: the threshold is the
-  // size this extension already treats as pasteable in a single clipboard call,
-  // so one chunk must not exceed it. test/test_chunks.mjs enforces the pair.
-  const CHUNK_MAX_CHARS = 1000000; // characters
+  // The only way a part may exceed this is when it holds a single segment that
+  // is longer than the ceiling on its own - a caption is never cut in half, and
+  // dropping or truncating it would lose text. test/test_chunks.mjs enforces
+  // both pairs and the partition itself.
+  const MAIN_CHUNK_MAX_CHARS = 1000000; // characters
+  // ---- chapter / player badges ----
+  // The same scheme, sized independently: a chapter node starts splitting above
+  // its own threshold and holds every part to its own ceiling, so the two
+  // operations can be retuned without touching each other.
+  const CHAPTER_CHUNK_THRESHOLD = 1000000; // characters
+  const CHAPTER_CHUNK_MAX_CHARS = 1000000; // characters
   // Active chunk session, for the main Transcript button or for a single
   // chapter button whose chapter is too long for one clipboard write.
   // `owner` is the button that started it, so a click on a different button
@@ -210,6 +236,7 @@
     capLang: null, // language of the rows that source returned ("ar", "ar-EG", ...)
     capLangMismatch: false, // a requested ytxt_lang could not be honored by the source that answered
     staleBlob: null, // id of a page player response ignored for belonging to another video
+    progress: null, // share of the whole transcript copied after this part (chunk sessions)
     error: null,
   };
   let debugEnabled = null;
@@ -247,6 +274,7 @@
       capLang: null,
       capLangMismatch: false,
       staleBlob: null,
+      progress: null,
       error: null,
     });
   }
@@ -259,6 +287,7 @@
         `source=${s.source} rows=${s.rows} panelRows=${s.panelRows} ` +
         `sweep=${s.sweep ? "yes(" + s.sweepSteps + ")" : "no"} incomplete=${s.incomplete} ` +
         `fallbacks=${s.fallbacks}${s.capSource ? " capSource=" + s.capSource : ""}${s.capLang ? " capLang=" + s.capLang : ""}${s.capLangMismatch ? " capLangMismatch=yes" : ""}${s.capRetries ? " retries=" + s.capRetries : ""} range=${s.range} ${s.durationMs}ms` +
+        (s.progress === null || s.progress === undefined ? "" : ` progress=${s.progress}%`) +
         (s.capFail ? ` capFail=${JSON.stringify(s.capFail)}` : "") +
         (s.staleBlob ? ` staleBlob=${s.staleBlob}` : "") +
         (s.error ? ` error=${JSON.stringify(s.error)}` : "")
@@ -288,6 +317,7 @@
       `${isolateRtl(s.label)} — source=${s.source} rows=${s.rows} panelRows=${s.panelRows} ` +
       `sweep=${s.sweep ? "yes(" + s.sweepSteps + ")" : "no"} incomplete=${s.incomplete} ` +
       `fallbacks=${s.fallbacks}${s.capSource ? " capSource=" + s.capSource : ""}${s.capRetries ? " retries=" + s.capRetries : ""} range=${s.range} ${s.durationMs}ms` +
+      (s.progress === null || s.progress === undefined ? "" : ` progress=${s.progress}%`) +
       (s.capFail ? ` capFail=${s.capFail}` : "") +
       (s.staleBlob ? ` staleBlob=${s.staleBlob}` : "") +
       (s.error ? ` error=${s.error}` : "");
@@ -504,6 +534,26 @@
     };
     return total === undefined ? one(n) : one(n) + "/" + one(total);
   }
+  // "43%", localized exactly the way the counts are - same locale, same
+  // numbering system - so a percentage is never in a different digit set from
+  // the count beside it (an Arabic page shows "٤٣٪", not "43%"). Intl also
+  // supplies the locale's own percent sign, which is not always "%".
+  function percentText(percent) {
+    const pct = Number(percent);
+    if (!isFinite(pct)) return "";
+    const locale = uiLocale();
+    try {
+      const fmt = uiNumberFormat();
+      const numberingSystem = fmt ? fmt.resolvedOptions().numberingSystem : null;
+      return new Intl.NumberFormat(locale, {
+        style: "percent",
+        maximumFractionDigits: 0,
+        ...(numberingSystem ? { numberingSystem } : {}),
+      }).format(pct / 100);
+    } catch (e) {
+      return Math.round(pct) + "%";
+    }
+  }
 
   // =========================================================
   // BIDI (RTL) GUARD FOR UI STRINGS
@@ -555,19 +605,20 @@
       "button.copied": "✓ Copied!",
       "button.failed": "❌ Failed",
       "button.chunkCopying": "⏳ {count}",
-      "button.chunkNext": "⏭ Copy {count}",
+      "button.chunkNext": "⏭ Copy {count} · {pct}",
       "button.chunkAll": "✓ All chunks copied!",
       "badge.copying": "⏳",
       "badge.copied": "✓",
       "badge.failed": "✗",
       "badge.hardFailed": "❌",
       "badge.chunkCopying": "⏳{count}",
-      "badge.chunkNext": "⏭{count}",
+      "badge.chunkNext": "⏭{count} · {pct}",
       "chapter.tip": "Copy transcript of chapter: {title}",
       "chapter.noTitleTip": "Copy transcript of this chapter",
       "player.tip": "Copy transcript of current chapter: {title}",
       "player.noChapterTip": "Copy transcript of current chapter",
       "chunk.instruction": "Paste chunk {n} ({title}) somewhere first, then click again to copy chunk {next} ({nextTitle}).",
+      "chunk.progress": "{pct} of the transcript copied so far.",
       "label.full": "Full transcript",
       "label.chapter": "Chapter: {title}",
       "label.chapterGeneric": "Chapter",
@@ -594,19 +645,20 @@
       "button.copied": "✓ تم النسخ!",
       "button.failed": "❌ فشل النسخ",
       "button.chunkCopying": "⏳ {count}",
-      "button.chunkNext": "⏭ نسخ {count}",
+      "button.chunkNext": "⏭ نسخ {count} · {pct}",
       "button.chunkAll": "✓ تم نسخ كل الأجزاء!",
       "badge.copying": "⏳",
       "badge.copied": "✓",
       "badge.failed": "✗",
       "badge.hardFailed": "❌",
       "badge.chunkCopying": "⏳{count}",
-      "badge.chunkNext": "⏭{count}",
+      "badge.chunkNext": "⏭{count} · {pct}",
       "chapter.tip": "نسخ نص الفصل: {title}",
       "chapter.noTitleTip": "نسخ نص هذا الفصل",
       "player.tip": "نسخ نص الفصل الحالي: {title}",
       "player.noChapterTip": "نسخ نص الفصل الحالي",
       "chunk.instruction": "الصق الجزء {n} ({title}) في مكان ما أولًا، ثم انقر مرة أخرى لنسخ الجزء {next} ({nextTitle}).",
+      "chunk.progress": "تم نسخ {pct} من النص حتى الآن.",
       "label.full": "النص الكامل",
       "label.chapter": "الفصل: {title}",
       "label.chapterGeneric": "فصل",
@@ -1336,13 +1388,26 @@
     return maxT;
   }
 
-  // Prepends the chapter title to copied text so every chunk is identifiable.
-  // Builds the ordered chunk list for the main Transcript button's chunk
-  // mode. One chunk per chapter by default; a chapter whose text alone would
-  // exceed CHUNK_MAX_CHARS is split into parts of ~CHUNK_MAX_CHARS at
-  // segment boundaries (never cutting a segment in half). Chunks are
-  // numbered 1..N and each starts with a self-describing title line.
-  function buildChunks(chapters, rows) {
+  // Builds the ordered part list for ONE node's batch: the main Transcript
+  // button's whole-video copy, or a single chapter's copy. `span` is that
+  // node's own unit of work ({ title, start, end }) and `maxChars` is that
+  // node's own ceiling, so each operation splits on its own numbers and no node
+  // is ever cut along another node's boundaries.
+  //
+  // How many parts there are is DERIVED from the rows the caption source
+  // actually returned (see splitRowsIntoParts) rather than from a fixed target:
+  // the text is divided into as few parts as the ceiling allows and those parts
+  // are then sized evenly, so a 2.1M-character transcript becomes three ~700k
+  // parts instead of 1M + 1M + a 100k tail. A whole segment is never cut in
+  // half; the only way a part can exceed the ceiling is by holding a single
+  // segment that is longer than the ceiling on its own. Parts are numbered
+  // 1..N and each starts with a self-describing title line.
+  //
+  // The returned parts are a LOSSLESS partition of `span`'s rows: every row
+  // lands in exactly one part, in order, so the parts reassemble into the
+  // source text byte for byte. That is asserted before returning - a partition
+  // that would drop, duplicate or truncate text throws instead of being pasted.
+  function buildChunks(span, rows, maxChars) {
     // A part marker appended to a title in an RTL script (Arabic, Hebrew, ...)
     // is reordered by the bidi algorithm against that title - the paragraph
     // direction comes from the title's first strong character, so "(part 1/3)"
@@ -1355,56 +1420,112 @@
     const partMarker = (marker, title) =>
       RTL_RE.test(title) ? "\u2066" + marker + "\u2069" : marker;
     const chunks = [];
-    for (let i = 0; i < chapters.length; i++) {
-      const ch = chapters[i];
-      const chapterRows = rows.filter((r) => r.t >= ch.start - 0.6 && r.t < ch.end);
-      if (!chapterRows.length) continue;
-      // A span with no title - a video with no chapters is split as one
-      // untitled span - must not be labelled "Chapter 1": its parts are numbered
-      // by position instead, and a single unsplit one gets no header line at all,
+    const spanRows = rows.filter((r) => r.t >= span.start - 0.6 && r.t < span.end);
+    if (spanRows.length) {
+      // A span with no title - the main button's whole-video batch is exactly
+      // that - must not be labelled "Chapter 1": its parts are numbered by
+      // position instead, and a single unsplit one gets no header line at all,
       // so it stays byte-identical to what was copied before.
-      const title = ch.title || "";
-      // Greedily pack whole segments into groups of at most CHUNK_MAX_CHARS
-      // of text (each row contributes its length plus the joining space).
-      const groups = [];
-      let cur = [];
-      let curLen = 0;
-      for (const r of chapterRows) {
-        const addLen = r.txt.length + 1;
-        if (cur.length && curLen + addLen > CHUNK_MAX_CHARS) {
-          groups.push(cur);
-          cur = [];
-          curLen = 0;
-        }
-        cur.push(r);
-        curLen += addLen;
-      }
-      if (cur.length) groups.push(cur);
-      if (groups.length === 1) {
-        const body = groups[0].map((r) => r.txt).join(" ");
+      const title = span.title || "";
+      const ceiling = maxChars > 0 ? maxChars : Infinity;
+      const groups = splitRowsIntoParts(spanRows, ceiling);
+      groups.forEach((g, gi) => {
+        // Never joined from anything but whole segment texts: `body` is the
+        // part's data and the only thing the losslessness check compares.
+        const body = g.map((r) => r.txt).join(" ");
+        const partTitle =
+          groups.length === 1
+            ? title
+            : title
+              ? `${title} ${partMarker(`(part ${gi + 1}/${groups.length})`, title)}`
+              : `Part ${gi + 1}/${groups.length}`;
         chunks.push({
-          title,
-          start: ch.start,
-          end: ch.end,
-          rowCount: groups[0].length,
-          text: title ? `${title}\n${body}` : body,
+          title: partTitle,
+          start: span.start,
+          end: span.end,
+          rowCount: g.length,
+          body,
+          text: partTitle ? `${partTitle}\n${body}` : body,
         });
-      } else {
-        groups.forEach((g, gi) => {
-          const partTitle = title
-            ? `${title} ${partMarker(`(part ${gi + 1}/${groups.length})`, title)}`
-            : `Part ${gi + 1}/${groups.length}`;
-          chunks.push({
-            title: partTitle,
-            start: ch.start,
-            end: ch.end,
-            rowCount: g.length,
-            text: `${partTitle}\n${g.map((r) => r.txt).join(" ")}`,
-          });
-        });
-      }
+      });
+      assertLosslessPartition(chunks, spanRows, ceiling);
     }
     return chunks.map((c, i) => ({ ...c, n: i + 1 }));
+  }
+
+  // Divides one node's rows into its parts. The part SIZE comes from the data
+  // that was actually returned rather than from a constant: the rows are split
+  // into the fewest parts the ceiling allows (ceil(total / ceiling)) and the
+  // target for each part is the text still unplaced shared over the parts still
+  // to come, re-derived as we go - so a part that came in under its target
+  // raises the next one's instead of leaving a stub at the end, and any size at
+  // all can be batched. The target is clamped to the ceiling, so no part can
+  // drift over it.
+  //
+  // A part is only ever closed BETWEEN segments, so a single segment longer
+  // than the ceiling ends up alone in its own (necessarily oversized) part
+  // rather than being cut in half. Every row is placed exactly once, in order.
+  function splitRowsIntoParts(rows, ceiling) {
+    const total = rowsLength(rows);
+    // Fits one write (or there is no ceiling): one part, byte-identical to the
+    // text a single write has always received.
+    if (!(total > ceiling)) return [rows];
+    let left = Math.ceil(total / ceiling);
+    const groups = [];
+    let cur = [];
+    let curLen = 0;
+    let remaining = total;
+    for (const r of rows) {
+      const addLen = r.txt.length + 1;
+      const target = Math.min(ceiling, Math.max(1, Math.ceil(remaining / Math.max(1, left))));
+      if (cur.length && curLen + addLen > target) {
+        groups.push(cur);
+        remaining -= curLen;
+        left--;
+        cur = [];
+        curLen = 0;
+      }
+      cur.push(r);
+      curLen += addLen;
+    }
+    if (cur.length) groups.push(cur);
+    return groups;
+  }
+
+  // How big a copy is, measured the way the batcher measures it: every row
+  // contributes its text plus the single space that follows it. So a part's
+  // body comes out strictly under its ceiling rather than exactly at it, and
+  // the callers that decide whether to batch measure their size with this same
+  // function, so the decision and the split can never disagree by a character.
+  function rowsLength(rows) {
+    let n = 0;
+    for (const r of rows) n += r.txt.length + 1;
+    return n;
+  }
+
+  // Refuses a partition that is not lossless.
+  //
+  // The parts are a partition of the rows by construction - splitRowsIntoParts
+  // pushes every row into exactly one group, in order, and nothing else ever
+  // touches the text - so this can only fail if that stops being true. When it
+  // does, failing loudly is the honest outcome: a copy that pasted a transcript
+  // with a hole in it, or with a part repeated, would look exactly like a
+  // successful copy.
+  function assertLosslessPartition(chunks, rows, ceiling) {
+    const source = rows.map((r) => r.txt).join(" ");
+    const reassembled = chunks.map((c) => c.body).join(" ");
+    const placed = chunks.reduce((n, c) => n + c.rowCount, 0);
+    // A part may only exceed the ceiling when it holds one single segment that
+    // is longer than the ceiling on its own: a caption is never cut in half.
+    const overfull = chunks.find((c) => c.body.length > ceiling && c.rowCount > 1);
+    if (reassembled !== source || placed !== rows.length || overfull) {
+      throw new Error(
+        "chunk partition would lose or duplicate transcript text " +
+          `(rows ${placed}/${rows.length}, ` +
+          `overfull=${overfull ? overfull.body.length + ">" + ceiling : "no"}) ` +
+          "- refusing to copy"
+      );
+    }
   }
 
   // =========================================================
@@ -1990,17 +2111,43 @@
   function setChunkLabel(btn, label, disabled) {
     btn.classList.add(CHUNK_LABEL_CLS);
     setButtonState(btn, label, disabled);
+    reserveBadgeRoom(btn);
   }
 
-  // The spans a copy should be split along: the chapter list when the video has
-  // one, otherwise a single untitled span covering the whole video. A video with
-  // no chapters (or just one) still has to respect the cap - the splits then
-  // simply fall on segment boundaries instead of chapter boundaries.
-  function chunkSpans() {
-    const chapters = getChapters();
-    return Array.isArray(chapters) && chapters.length >= 2
-      ? chapters
-      : [{ title: "", start: 0, end: Infinity }];
+  // Tells a chapter row how much room its badge is taking, so the row can keep
+  // the chapter title out from under it.
+  //
+  // The compact badge is absolutely positioned, so a wide pill does not push the
+  // title aside - it covers it, and a long title is exactly where the end of the
+  // label would land. The row is given the width the badge actually rendered at
+  // (measured after the label is set, so it is right for any wording, digit set
+  // and part count) and content.css reserves it. Only the chapter rows need this:
+  // the badge on a chapter card sits over the thumbnail, and the player's badge
+  // shares a flex row that reflows on its own.
+  function reserveBadgeRoom(btn) {
+    // The main button's label is already in the page flow; nothing to reserve.
+    if (!btn.getAttribute("data-orig")) return;
+    const row = btn.parentElement;
+    if (!row || typeof row.matches !== "function" || !row.matches(CHAPTER_ITEM_SELECTOR)) return;
+    if (!row.classList || !row.style || typeof row.style.setProperty !== "function") return;
+    let width = 0;
+    try {
+      const rect = btn.getBoundingClientRect ? btn.getBoundingClientRect() : null;
+      width = rect && rect.width ? Math.ceil(rect.width) : 0;
+    } catch (e) {}
+    // Nothing measured means nothing to go on: leave the row exactly as it was
+    // rather than reserve a number that is not the badge's real width.
+    if (!width) return;
+    row.classList.add(BADGE_PILL_CLS);
+    row.style.setProperty(BADGE_ROOM_VAR, width + BADGE_ROOM_GAP + "px");
+  }
+
+  // The main Transcript button's single unit of work: the whole video, with no
+  // title, so its parts are numbered by position ("Part 2/5") instead of being
+  // labelled with a chapter. The main button never splits along chapters - a
+  // chapter is another node's unit, batched by that node on its own numbers.
+  function wholeVideoSpan() {
+    return { title: "", start: 0, end: Infinity };
   }
 
   // Writes one clipboard payload, and if that single write is rejected, degrades
@@ -2016,13 +2163,14 @@
   //
   // Returns "whole" when the payload was written in one go, or "parts" when a
   // chunk session was started (the caller must then leave the button alone -
-  // copyNextChunk has already set it up).
-  async function copyRowsWithSplitFallback(rows, splitBy, text, btn) {
+  // copyNextChunk has already set it up). `maxChars` is the caller's own cap,
+  // so a recovery re-split still follows the caller's numbers.
+  async function copyRowsWithSplitFallback(rows, span, text, btn, maxChars) {
     try {
       await copyTextToClipboard(text);
       return "whole";
     } catch (err) {
-      const chunks = splitBy ? buildChunks(splitBy, rows) : [];
+      const chunks = span ? buildChunks(span, rows, maxChars) : [];
       if (chunks.length < 2) throw err;
       console.warn(
         `[YT-Transcript] one clipboard write was rejected; copying as ${chunks.length} parts instead:`,
@@ -2043,21 +2191,24 @@
   // an ordered part sequence when they do not. A long chapter used to go to the
   // clipboard in one write however big it was, so a single 3-hour chapter inside
   // a stream became one enormous paste with no way to tell how much was left;
-  // chapter buttons now behave like the main button's chunk mode, turning into
-  // an "n/N" control.
+  // chapter buttons now behave like a batch of their own, turning into an "n/N"
+  // control. This is the chapter node's OWN batcher: it splits on the CHAPTER_*
+  // numbers and never on the main button's, so retuning one leaves the other
+  // alone.
   //
   // Returns false when there is nothing to copy, so callers fall through to their
   // next source. `chapter` may be null (a chapter-shelf entry that could not be
-  // matched to the chapter list), where there is no title to split by: the rows
-  // are then written as-is, exactly as before.
+  // matched to the chapter list), where there is no title to split by: it
+  // becomes an untitled span of its own and the rows are written as-is, exactly
+  // as before.
   async function copyChapterRows(rows, chapter, btn) {
     if (!rows.length) return false;
-    // An unmatched chapter-shelf entry has no title and no range, so it is split
-    // as one untitled span (its parts are then numbered by position).
-    const splitBy = chapter ? [chapter] : chunkSpans();
-    const chunks = buildChunks(splitBy, rows);
+    const span = chapter || wholeVideoSpan();
+    const chunks = buildChunks(span, rows, CHAPTER_CHUNK_MAX_CHARS);
     if (!chunks.length || !chunks[0].text) return false;
-    if (chunks.length > 1) {
+    // A chapter batches itself: it is only cut into parts when the chapter alone
+    // is bigger than its own ceiling and yields more than one part.
+    if (rowsLength(rows) > CHAPTER_CHUNK_THRESHOLD && chunks.length > 1) {
       chunkSession = { chunks, idx: 0, owner: btn };
       try {
         await copyNextChunk(btn);
@@ -2072,7 +2223,7 @@
     }
     // Fits in one write - but if that write is rejected for size, fall back to
     // parts rather than failing (see copyRowsWithSplitFallback).
-    const outcome = await copyRowsWithSplitFallback(rows, splitBy, chunks[0].text, btn);
+    const outcome = await copyRowsWithSplitFallback(rows, span, chunks[0].text, btn, CHAPTER_CHUNK_MAX_CHARS);
     if (outcome === "whole") {
       lastStats.rows = chunks[0].rowCount || rows.length;
       logStats();
@@ -2228,6 +2379,14 @@
     if (btn) {
       // A chunk count needs the pill layout; an idle label does not.
       btn.classList.remove(CHUNK_LABEL_CLS);
+      // ...and the room the pill reserved goes back to the chapter title.
+      const row = btn.parentElement;
+      if (row && row.classList) {
+        row.classList.remove(BADGE_PILL_CLS);
+        if (row.style && typeof row.style.removeProperty === "function") {
+          row.style.removeProperty(BADGE_ROOM_VAR);
+        }
+      }
       btn.textContent = btn.getAttribute("data-orig") || t("button.idle");
       btn.disabled = false;
       // Restore the button's own tooltip: a chunk session overwrote it with the
@@ -2236,6 +2395,22 @@
       // stores none, so it simply ends up without a tooltip.
       btn.title = btn.getAttribute("data-tip") || "";
     }
+  }
+
+  // How much of the whole transcript a chunk session has already put on the
+  // clipboard. Measured the way the parts were sized - every segment counts as
+  // its text plus its joining space - so it is earned, not estimated: it adds a
+  // part only once that part has been written, and it reaches exactly 100% on
+  // the last one. `upto` is the number of parts already copied.
+  function sessionProgress(session, upto) {
+    let total = 0;
+    let done = 0;
+    session.chunks.forEach((c, i) => {
+      const len = String(c.body == null ? "" : c.body).length + 1;
+      total += len;
+      if (i < upto) done += len;
+    });
+    return { done, total, pct: total ? Math.round((done / total) * 100) : 100 };
   }
 
   // Copies the next chunk of an active chunk session. The button becomes a
@@ -2266,8 +2441,12 @@
     const compact = !!btn.getAttribute("data-orig");
     setChunkLabel(btn, t(compact ? "badge.chunkCopying" : "button.chunkCopying", { count: countText(ch.n, n) }), true);
     await copyTextToClipboard(ch.text);
-    logStats();
     session.idx++;
+    // Read after the write and before the report: the share shown is the one
+    // that is actually on the clipboard, with nothing in flight counted.
+    const copied = sessionProgress(session, session.idx);
+    lastStats.progress = copied.pct;
+    logStats();
 
     if (session.idx >= n) {
       // Single glyph: the circular badge fits it, so no count class here.
@@ -2281,15 +2460,25 @@
     const next = session.chunks[session.idx];
     setChunkLabel(
       btn,
-      t(compact ? "badge.chunkNext" : "button.chunkNext", { count: countText(next.n, n) }),
+      // The compact badges are 22px circles: a count already widens them into a
+      // pill, and a percentage as well would be wide enough to sit over the
+      // chapter title it belongs to. So the count stays bare there and the share
+      // is carried by the tooltip (and by the report) instead.
+      t(compact ? "badge.chunkNext" : "button.chunkNext", {
+        count: countText(next.n, n),
+        pct: percentText(copied.pct),
+      }),
       false
     );
-    btn.title = t("chunk.instruction", {
-      n: countText(ch.n),
-      title: isolateRtl(ch.title),
-      next: countText(next.n),
-      nextTitle: isolateRtl(next.title),
-    });
+    btn.title =
+      t("chunk.instruction", {
+        n: countText(ch.n),
+        title: isolateRtl(ch.title),
+        next: countText(next.n),
+        nextTitle: isolateRtl(next.title),
+      }) +
+      " " +
+      t("chunk.progress", { pct: percentText(copied.pct) });
   }
 
   async function handleClick() {
@@ -2369,17 +2558,17 @@
       const fullText = rows.map((r) => r.txt).join(" ");
 
       // Keep normal videos as a single copy, but split exceptionally large
-      // chaptered transcripts into ordered, bounded chunks so very long
-      // videos remain usable when the browser clipboard rejects one huge
-      // write.
-      // Split whenever one write would exceed the cap, whether or not the video
-      // has chapters. The cap limits a single clipboard write, so it is not a
-      // chapter feature: requiring two chapters here meant a chapterless video
-      // wrote its whole transcript in one go, however large. The chapter list
-      // only decides WHERE the splits fall.
-      const splitBy = chunkSpans();
-      if (fullText.length > CHUNK_THRESHOLD) {
-        const chunks = buildChunks(splitBy, rows);
+      // transcripts into ordered, bounded parts so very long videos remain
+      // usable when the browser clipboard rejects one huge write.
+      //
+      // This is the main button's OWN batcher over the whole transcript: it
+      // never consults the chapter list, so a 19-hour chaptered video batches
+      // by size ("Part 1/N") exactly like a chapterless one, instead of being
+      // cut into one piece per chapter and labelled with chapter titles.
+      // Chapters are other nodes with their own buttons and their own numbers.
+      const span = wholeVideoSpan();
+      if (rowsLength(rows) > MAIN_CHUNK_THRESHOLD) {
+        const chunks = buildChunks(span, rows, MAIN_CHUNK_MAX_CHARS);
         if (chunks.length >= 2) {
           chunkSession = { chunks, idx: 0, owner: btn };
           await copyNextChunk(btn);
@@ -2387,7 +2576,7 @@
         }
       }
 
-      const outcome = await copyRowsWithSplitFallback(rows, splitBy, fullText, btn);
+      const outcome = await copyRowsWithSplitFallback(rows, span, fullText, btn, MAIN_CHUNK_MAX_CHARS);
       if (outcome === "whole") {
         logStats();
         btn.textContent = t("button.copied");
@@ -2409,8 +2598,15 @@
           const retryText = retryCaps.map((r) => r.txt).join(" ");
           if (retryText) {
             // Same rule as the first attempt: a rejected single write degrades
-            // into parts instead of failing twice.
-            const retryOutcome = await copyRowsWithSplitFallback(retryCaps, chunkSpans(), retryText, btn);
+            // into parts instead of failing twice - through the main button's
+            // own batcher, still ignoring chapters.
+            const retryOutcome = await copyRowsWithSplitFallback(
+              retryCaps,
+              wholeVideoSpan(),
+              retryText,
+              btn,
+              MAIN_CHUNK_MAX_CHARS
+            );
             if (retryOutcome === "whole") {
               lastStats.source = "captions";
               lastStats.rows = retryCaps.length;
