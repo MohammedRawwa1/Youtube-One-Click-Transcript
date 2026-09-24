@@ -28,7 +28,7 @@ const EXPECTED_PARAMS = encodeURIComponent(
 const EXPECTED_PANEL_PARAMS = Buffer.from([
   0xaa, 0x09, 0x0f, 0x0a, 0x0b, ...Buffer.from(VIDEO_ID, "utf8"), 0x18, 0x01,
 ]).toString("base64");
-const EXPECTED_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
+const EXPECTED_KEY = "Website Key";
 const FAKE_VISITOR = "CgsZm9vYmFyMTIzNDU2Nzg5MA==";
 
 const okTimedtextJson = JSON.stringify({
