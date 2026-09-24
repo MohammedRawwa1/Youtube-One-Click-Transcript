@@ -3,7 +3,9 @@
 // that caps every chunk at CHUNK_MAX_CHARS characters.
 import fs from "node:fs";
 
-const src = fs.readFileSync("content.js", "utf8");
+// CRLF-safe: a Windows checkout (core.autocrlf) restores CRLF line endings while
+// every anchor below is written against LF, so normalize before matching.
+const src = fs.readFileSync("content.js", "utf8").replace(/\r\n/g, "\n");
 const start = src.indexOf("  function buildChunks(");
 const end = src.indexOf("\n\n  // =========================================================\n  // FALLBACK: CAPTION SOURCES", start);
 if (start < 0 || end < 0) {

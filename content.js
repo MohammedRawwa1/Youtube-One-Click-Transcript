@@ -123,11 +123,14 @@
 
   // Full-transcript copies longer than this are split into per-chapter
   // clipboard copies (one chunk per click) when the video has chapters.
-  // 100k was too eager: a typical 2-6h course/podcast transcript lands
-  // between 100k-400k chars and pastes fine in one shot. A 19h transcript
-  // can still be under 1M chars, so use a lower cutoff that keeps normal
-  // videos whole while protecting very long videos from clipboard limits.
-  const CHUNK_THRESHOLD = 500000; // characters
+  // 500k was still too eager at the long end: a 19-hour lecture or stream is
+  // commonly only a little over 1M characters, so at 500k a chaptered course
+  // was cut into one piece per chapter (100+ clicks) instead of being copied
+  // whole. 1M characters is ~2 MB as UTF-16 - a couple of megabytes is
+  // nothing to hold or write, on a desktop or on a phone browser running an
+  // extension - so the cutoff sits where a single write really is a problem,
+  // rather than at a fixed fraction of it.
+  const CHUNK_THRESHOLD = 1000000; // characters
   // When chunk mode is active, no single copied chunk may exceed this many
   // characters: an oversized chapter (e.g. one 3h chapter inside a stream)
   // is split into ~CHUNK_MAX_CHARS pieces at segment boundaries so every
@@ -147,17 +150,26 @@
   //  - navigator.clipboard.writeText documents no size limit; the only failure
   //    it names is NotAllowedError, which is about permission, secure context
   //    and focus, not length.
-  //  - The real ceiling is the execCommand fallback in copyTextToClipboard(),
-  //    which lays the string out in a hidden textarea first; that route has
-  //    been reported to struggle from roughly 180k characters (Chrome 55 era).
-  // 500k characters is ~1 MB as UTF-16 and ~0.2% of the 256 MiB read cap, and
-  // the practical gain above it is small anyway: chunks are one per chapter, so
-  // this only decides when a single long chapter has to be split.
+  //  - The one size-sensitive route is the execCommand fallback in
+  //    copyTextToClipboard(), which lays the string out in a hidden textarea
+  //    first and has been reported to struggle from roughly 180k characters
+  //    (Chrome 55 era). It only runs when writeText is unavailable, and a
+  //    write it rejects is not a dead end: copyRowsWithSplitFallback() - and
+  //    the main path's retry - turn the same text into an ordered part
+  //    sequence, so an oversized chunk degrades into more, smaller chunks
+  //    instead of failing the copy.
+  // 1M characters is ~2 MB as UTF-16 and ~0.4% of the 256 MiB read cap. The
+  // value is bounded by memory rather than by the clipboard, and extensions
+  // load on phones too (Firefox for Android, Kiwi and friends), where the
+  // async clipboard path is the same API - a couple of megabytes is fine to
+  // hold and write there. The win is real: a 19h transcript just over 500k
+  // characters went from a chunk per chapter to a single copy. Chunks are one
+  // per chapter, so this only decides when a single long chapter is split.
   //
   // Kept equal to CHUNK_THRESHOLD, and never above it: the threshold is the
   // size this extension already treats as pasteable in a single clipboard call,
   // so one chunk must not exceed it. test/test_chunks.mjs enforces the pair.
-  const CHUNK_MAX_CHARS = 500000; // characters
+  const CHUNK_MAX_CHARS = 1000000; // characters
   // Active chunk session, for the main Transcript button or for a single
   // chapter button whose chapter is too long for one clipboard write.
   // `owner` is the button that started it, so a click on a different button

@@ -3,7 +3,9 @@
 // caption content is throttled in headless browsers.
 import fs from "node:fs";
 
-const src = fs.readFileSync("content.js", "utf8");
+// CRLF-safe: a Windows checkout (core.autocrlf) restores CRLF line endings while
+// every anchor below is written against LF, so normalize before matching.
+const src = fs.readFileSync("content.js", "utf8").replace(/\r\n/g, "\n");
 const start = src.indexOf("  async function loadTranscriptSegments(");
 const end = src.indexOf("\n\n  function collectedMaxT", start);
 if (start < 0 || end < 0) {

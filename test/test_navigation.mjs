@@ -13,7 +13,9 @@
 import fs from "node:fs";
 import zlib from "node:zlib";
 
-const src = fs.readFileSync("content.js", "utf8");
+// CRLF-safe: a Windows checkout (core.autocrlf) restores CRLF line endings while
+// every anchor below is written against LF, so normalize before matching.
+const src = fs.readFileSync("content.js", "utf8").replace(/\r\n/g, "\n");
 
 function extract(startMarker, endMarker, label) {
   const start = src.indexOf(startMarker);

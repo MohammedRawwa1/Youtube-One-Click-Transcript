@@ -8,7 +8,9 @@
 import fs from "node:fs";
 import zlib from "node:zlib";
 
-const src = fs.readFileSync("content.js", "utf8");
+// CRLF-safe: a Windows checkout (core.autocrlf) restores CRLF line endings while
+// every anchor below is written against LF, so normalize before matching.
+const src = fs.readFileSync("content.js", "utf8").replace(/\r\n/g, "\n");
 const extract = (a, b) => {
   const s = src.indexOf(a);
   const e = src.indexOf(b, s);
@@ -675,7 +677,7 @@ const track = (baseUrl, languageCode, kind) => (kind ? { baseUrl, languageCode, 
 
   // The chapter badge is positioned logically, so a mirrored RTL watch page
   // cannot put it on top of the chapter title it belongs to.
-  const css = fs.readFileSync("content.css", "utf8");
+  const css = fs.readFileSync("content.css", "utf8").replace(/\r\n/g, "\n");
   const badgeRule = css.slice(css.indexOf(".my-yt-chapter-copy {"), css.indexOf(".my-yt-chapter-copy:hover"));
   check("the chapter badge uses a logical inline-end inset", /inset-inline-end: 6px/.test(badgeRule), badgeRule.replace(/\s+/g, " ").slice(0, 120));
   check("...and no physical `right` offset", !/^\s*right:/m.test(badgeRule), "a physical right offset is still there");
