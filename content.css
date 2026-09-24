@@ -1,0 +1,216 @@
+/* Main "Transcript" button (styles are mostly inline; this adds a hover touch) */
+#my-yt-transcript-button:hover {
+  filter: brightness(0.94);
+}
+
+#my-yt-transcript-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+/* =========================================================
+   Per-chapter "copy transcript" buttons
+   Injected as the last child of each chapter row / card.
+   ========================================================= */
+.my-yt-chapter-copy {
+  position: absolute;
+  /* Logical, not physical: YouTube mirrors the whole watch layout for RTL
+     languages, so a hard-coded `right` would park the badge on top of the
+     chapter title in an Arabic or Hebrew UI. Inline-end follows the row's own
+     direction, which is exactly where the badge belongs. */
+  inset-inline-end: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 10;
+
+  width: 22px;
+  height: 22px;
+  padding: 0;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+
+  font-size: 11px;
+  line-height: 1;
+  color: #ffffff;
+  background: rgba(0, 0, 0, 0.72);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+
+.my-yt-chapter-copy:hover {
+  transform: translateY(-50%) scale(1.15);
+  background: rgba(0, 0, 0, 0.85);
+}
+
+.my-yt-chapter-copy:disabled {
+  cursor: wait;
+  opacity: 0.75;
+}
+
+/* While a chunk session is driving the badge its label is an "n/N" count, which
+   does not fit a 22px circle - the digits would spill out over the chapter
+   title. The class (added by setChunkLabel(), removed by resetMainButton())
+   grows the circle into a pill wide enough for the count. */
+.my-yt-chapter-copy.my-yt-chunking {
+  width: auto;
+  min-width: 22px;
+  padding: 0 6px;
+  border-radius: 11px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* Modern chapter cards are vertical (thumbnail on top), so anchor the
+   button to the top-right corner of the thumbnail instead of the middle. */
+ytd-macro-markers-list-item-renderer[layout*="VERTICAL"] > .my-yt-chapter-copy {
+  top: 8px;
+  transform: none;
+}
+
+ytd-macro-markers-list-item-renderer[layout*="VERTICAL"] > .my-yt-chapter-copy:hover {
+  transform: scale(1.15);
+}
+
+/* Slightly lighter badge on dark theme cards */
+html[dark] .my-yt-chapter-copy {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+}
+
+html[dark] .my-yt-chapter-copy:hover {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+/* =========================================================
+   Current-chapter copy button inside the player
+   (anchored next to .ytp-chapter-title in the control bar)
+   ========================================================= */
+#my-yt-player-chapter-btn {
+  align-self: center;
+  margin: 0 8px;
+  padding: 0;
+
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+
+  font-size: 12px;
+  line-height: 1;
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.25);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+
+#my-yt-player-chapter-btn:hover {
+  transform: scale(1.12);
+  background: rgba(255, 255, 255, 0.4);
+}
+
+#my-yt-player-chapter-btn:disabled {
+  cursor: wait;
+  opacity: 0.75;
+}
+
+/* Same as the chapter badge: the 24px circle becomes a pill while it is showing
+   an "n/N" count. */
+#my-yt-player-chapter-btn.my-yt-chunking {
+  width: auto;
+  min-width: 24px;
+  padding: 0 7px;
+  border-radius: 12px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* =========================================================
+   Debug overlay (opt-in via ytxt_debug)
+   ========================================================= */
+#my-yt-debug-overlay {
+  position: fixed;
+  /* Mirrors with the page direction like the rest of the UI (see the chapter
+     badge above). Purely cosmetic - the overlay is ours, not YouTube's. */
+  inset-inline-end: 16px;
+  bottom: 16px;
+  z-index: 2147483647;
+  max-width: 460px;
+  background: rgba(15, 15, 15, 0.94);
+  color: #e8e8e8;
+  font: 11px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  padding: 8px 10px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55);
+}
+
+#my-yt-debug-overlay .my-yt-debug-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+#my-yt-debug-overlay .my-yt-debug-title {
+  font-weight: 600;
+  color: #7ee787;
+  flex: 1;
+}
+
+#my-yt-debug-overlay button {
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+#my-yt-debug-overlay button:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+#my-yt-debug-overlay .my-yt-debug-summary {
+  /* Bidi guard, display only. The report often carries a chapter title in an
+     RTL script, and the summary is one long LTR line: it either reorders the
+     line around that title or, worse, drags the title's punctuation across the
+     fields next to it. `plaintext` resolves each line's own direction from its
+     first strong character instead of inheriting the overlay's LTR direction.
+     Done in CSS deliberately - the report that the Copy button puts on the
+     clipboard must stay byte-identical, so no control characters are inserted
+     into it. */
+  unicode-bidi: plaintext;
+  text-align: start;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 6px;
+  color: #d0d0d0;
+}
+
+#my-yt-debug-overlay .my-yt-debug-json {
+  /* Same display-only guard for the JSON dump. */
+  unicode-bidi: plaintext;
+  text-align: start;
+  margin: 0;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #b0b0b0;
+}

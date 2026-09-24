@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube One-Click Transcript",
+  "version": "1.7.0",
+  "description": "Copy a YouTube video's transcript to your clipboard with one click, or copy just one chapter's transcript when the video is too long.",
+  "permissions": [
+    "clipboardWrite"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
