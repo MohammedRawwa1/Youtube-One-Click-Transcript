@@ -2439,7 +2439,17 @@
     // without any words; the main button has room for the full label. The
     // explanation is carried by the tooltip either way.
     const compact = !!btn.getAttribute("data-orig");
-    setChunkLabel(btn, t(compact ? "badge.chunkCopying" : "button.chunkCopying", { count: countText(ch.n, n) }), true);
+    // The counter is PROGRESS, not the next part's number: it counts the parts
+    // already on the clipboard. `session.idx` is exactly that count, so this
+    // first write shows 0/N (nothing copied yet) and the label after it moves
+    // to 1/N, 2/N, ... - it no longer names the part this very click is about
+    // to copy, which read as though a part had been counted before the user's
+    // first paste.
+    setChunkLabel(
+      btn,
+      t(compact ? "badge.chunkCopying" : "button.chunkCopying", { count: countText(session.idx, n) }),
+      true
+    );
     await copyTextToClipboard(ch.text);
     session.idx++;
     // Read after the write and before the report: the share shown is the one
@@ -2465,7 +2475,8 @@
       // chapter title it belongs to. So the count stays bare there and the share
       // is carried by the tooltip (and by the report) instead.
       t(compact ? "badge.chunkNext" : "button.chunkNext", {
-        count: countText(next.n, n),
+        // The same progress count: every part copied, this one included.
+        count: countText(session.idx, n),
         pct: percentText(copied.pct),
       }),
       false

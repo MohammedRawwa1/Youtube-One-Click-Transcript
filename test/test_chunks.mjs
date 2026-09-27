@@ -523,14 +523,14 @@ function check(name, cond, detail) {
 
     await helpers.copyNextChunk(btn);
     check(
-      "an oversized chapter shows its part count while copying",
-      seen.labelsWhileWriting[0] === "⏳1/3",
+      "the counter starts at 0: nothing is copied yet while the first write is in flight",
+      seen.labelsWhileWriting[0] === "⏳0/3",
       String(seen.labelsWhileWriting[0])
     );
     check("the count widens the badge into a pill", btn.classes.has("my-yt-chunking"), [...btn.classes].join(","));
     check(
-      "the next part is offered once the current one is copied, with the share",
-      btn.textContent === "⏭2/3 · 11%",
+      "the count is the parts already copied - one - not the next part's number",
+      btn.textContent === "⏭1/3 · 11%",
       btn.textContent
     );
     check(
@@ -543,7 +543,7 @@ function check(name, cond, detail) {
     await helpers.copyNextChunk(btn);
     check(
       "the count and the share both advance part by part",
-      seen.labelsWhileWriting[1] === "⏳2/3" && btn.textContent === "⏭3/3 · 41%",
+      seen.labelsWhileWriting[1] === "⏳1/3" && btn.textContent === "⏭2/3 · 41%",
       `${seen.labelsWhileWriting[1]} / ${btn.textContent}`
     );
     check(
@@ -572,7 +572,7 @@ function check(name, cond, detail) {
     await helpers.copyNextChunk(btn);
     check(
       "the main button keeps its wordier count",
-      seen.labelsWhileWriting[0] === "⏳ 1/3" && btn.textContent === "⏭ Copy 2/3 · 11%",
+      seen.labelsWhileWriting[0] === "⏳ 0/3" && btn.textContent === "⏭ Copy 1/3 · 11%",
       `${seen.labelsWhileWriting[0]} / ${btn.textContent}`
     );
     check(
@@ -617,7 +617,7 @@ function check(name, cond, detail) {
   }
 
   // The counters follow the page's numerals: a page whose language is Arabic
-  // shows "⏳١/٣" and "⏭٢/٣" rather than ASCII digits.
+  // shows "⏳٠/٣" and "⏭١/٣" rather than ASCII digits.
   {
     const arabicCounts = buildCountText({ lang: "ar" });
     const arabicPercents = buildPercentText({ lang: "ar" });
@@ -625,13 +625,13 @@ function check(name, cond, detail) {
     const session = { chunks: chunkList, idx: 0, owner: btn };
     const { helpers, seen } = wire(session, btn, arabicCounts, arabicPercents);
     await helpers.copyNextChunk(btn);
-    check("an Arabic page shows Arabic-Indic counter digits", seen.labelsWhileWriting[0] === "⏳١/٣", String(seen.labelsWhileWriting[0]));
+    check("an Arabic page shows Arabic-Indic counter digits", seen.labelsWhileWriting[0] === "⏳٠/٣", String(seen.labelsWhileWriting[0]));
     check(
-      "...and offers the next part, and the share, in the same digits",
-      visibleText(btn.textContent) === "⏭٢/٣ · ١١٪",
+      "...and carries the progress count and the share in the same digits",
+      visibleText(btn.textContent) === "⏭١/٣ · ١١٪",
       btn.textContent
     );
-    check("...with the slash still between the two numbers", seen.labelsWhileWriting[0].includes("١/٣"), String(seen.labelsWhileWriting[0]));
+    check("...with the slash still between the two numbers", seen.labelsWhileWriting[0].includes("٠/٣"), String(seen.labelsWhileWriting[0]));
 
     const mainBtn = makeButton();
     const mainSession = { chunks: chunkList, idx: 0, owner: mainBtn };
@@ -639,7 +639,7 @@ function check(name, cond, detail) {
     await mainHelpers.copyNextChunk(mainBtn);
     check(
       "the main button's wordier count is localized too",
-      visibleText(mainBtn.textContent) === "⏭ Copy ٢/٣ · ١١٪",
+      visibleText(mainBtn.textContent) === "⏭ Copy ١/٣ · ١١٪",
       mainBtn.textContent
     );
   }
@@ -650,7 +650,7 @@ function check(name, cond, detail) {
     const session = { chunks: chunkList, idx: 0, owner: btn };
     const { helpers, seen } = wire(session, btn, buildCountText({ lang: "en-GB" }));
     await helpers.copyNextChunk(btn);
-    check("an English page keeps ASCII counter digits", seen.labelsWhileWriting[0] === "⏳1/3" && btn.textContent === "⏭2/3 · 11%", `${seen.labelsWhileWriting[0]} / ${btn.textContent}`);
+    check("an English page keeps ASCII counter digits", seen.labelsWhileWriting[0] === "⏳0/3" && btn.textContent === "⏭1/3 · 11%", `${seen.labelsWhileWriting[0]} / ${btn.textContent}`);
   }
 
   // The chapter copy path that owns the session (copyChapterRows).
