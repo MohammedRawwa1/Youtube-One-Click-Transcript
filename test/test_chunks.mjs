@@ -394,9 +394,18 @@ function check(name, cond, detail) {
   );
   check(
     "the main button batches on its own span and its own cap",
-    /copyRowsWithSplitFallback\(\s*rows,\s*span,\s*fullText,\s*btn,\s*MAIN_CHUNK_MAX_CHARS\s*\)/.test(mainSrc) &&
-      /buildChunks\(span, rows, MAIN_CHUNK_MAX_CHARS\)/.test(mainSrc),
+    // `opts` (the text format) is the only extra argument the copy paths take:
+    // the batcher, the threshold and the recovery must still be the main
+    // button's own.
+    /copyRowsWithSplitFallback\(\s*rows,\s*span,\s*fullText,\s*btn,\s*MAIN_CHUNK_MAX_CHARS,\s*opts\s*\)/.test(mainSrc) &&
+      /buildChunks\(span,\s*rows,\s*MAIN_CHUNK_MAX_CHARS,\s*opts\)/.test(mainSrc) &&
+      /rowsLength\(rows,\s*opts\)\s*>\s*MAIN_CHUNK_THRESHOLD/.test(mainSrc),
     "the main path did not use MAIN_CHUNK_* with the whole-video span"
+  );
+  check(
+    "...and never a chapter's or the SRT batcher's numbers",
+    !/CHAPTER_CHUNK|SRT_CHUNK/.test(mainSrc),
+    (mainSrc.match(/CHAPTER_CHUNK\w+|SRT_CHUNK\w+/g) || []).join(",")
   );
 }
 
@@ -425,21 +434,46 @@ function check(name, cond, detail) {
     `len=${btnSrc.length}`
   );
 
+  // The three states of a session are worded per output and per button shape,
+  // and the table lives in content.js (above copyNextChunk, i.e. outside the
+  // slice extracted below), so it is read out of the source and injected.
+  // The table of session labels (copy vs SRT, full label vs compact badge) is
+  // declared just above copyNextChunk, so the slice below carries it and the
+  // wording of all three states is exercised through the real table.
+  check(
+    "the session label table is inside the extracted slice",
+    btnSrc.includes("const SESSION_LABELS = {") && btnSrc.includes("srt.badgeNext"),
+    "the labels would otherwise be the injected stubs'"
+  );
+
+  // The idle label of the main button depends on the operation it is set to run
+  // (remembered from the caret menu), so the constant that names it is read out
+  // of the source rather than spelled again here.
+  const actionSrt = (src.match(/const ACTION_SRT = "([^"]+)"/) || [])[1];
+  check("the remembered-action constant is readable", actionSrt === "srt", String(actionSrt));
+
   const buildButtons = new Function(
     "chunkSession",
     "CHUNK_LABEL_CLS",
+    "ACTION_SRT",
     "setButtonState",
     "setChunkLabel",
     "resetStats",
     "lastStats",
     "logStats",
     "copyTextToClipboard",
+    "downloadSrtFileText",
+    "srtFilename",
+    "videoTitle",
     "console",
     "setTimeout",
     "isolateRtl",
     "countText",
     "percentText",
     "t",
+    // content.js never reads `session.mode` unless it is "srt", so a session
+    // built by the older scenarios (mode undefined) is a copy session - which is
+    // what the label table and the write target below also assume.
     `${btnSrc}\n    return { copyNextChunk, resetMainButton, session: () => chunkSession };`
   );
 
@@ -457,7 +491,7 @@ function check(name, cond, detail) {
 
   // A stand-in for a real button: textContent/disabled/classList plus the two
   // data attributes copyNextChunk and resetMainButton read.
-  const makeButton = ({ orig = null, tip = "" } = {}) => {
+  const makeButton = ({ orig = null, tip = "", mode = null } = {}) => {
     const btn = {
       textContent: orig || "📜 Transcript",
       disabled: false,
@@ -468,17 +502,26 @@ function check(name, cond, detail) {
       add: (c) => btn.classes.add(c),
       remove: (c) => btn.classes.delete(c),
     };
-    btn.getAttribute = (name) => (name === "data-orig" ? orig : name === "data-tip" ? tip : null);
+    btn.getAttribute = (name) =>
+      name === "data-orig" ? orig : name === "data-tip" ? tip : name === "data-mode" ? mode : null;
     return btn;
   };
 
-  const wire = (session, btn, countText = buildCountText(), percentText = buildPercentText(), t = buildUi().t) => {
-    const seen = { writes: [], labelsWhileWriting: [], timers: [] };
+  const wire = (
+    session,
+    btn,
+    countText = buildCountText(),
+    percentText = buildPercentText(),
+    t = buildUi().t,
+    files = []
+  ) => {
+    const seen = { writes: [], labelsWhileWriting: [], timers: [], files };
     // A stand-in for lastStats: copyNextChunk records the part's share there.
     const stats = {};
     const helpers = buildButtons(
       session,
       "my-yt-chunking",
+      actionSrt,
       (b, label, disabled) => {
         b.textContent = label;
         b.disabled = !!disabled;
@@ -496,6 +539,16 @@ function check(name, cond, detail) {
         // Read the label mid-write: it is the "copying part n" state.
         seen.labelsWhileWriting.push(btn.textContent);
       },
+      // A saved part file is recorded instead of written to the clipboard, so a
+      // download session can be told apart from a copy session by what it did.
+      (name, text) => {
+        files.push({ name, text });
+        // Read the label mid-save, exactly as the clipboard stub does for a
+        // copy: the state while the part is being written.
+        seen.labelsWhileWriting.push(btn.textContent);
+      },
+      (title, part) => `${title || "transcript"}${part && part.total > 1 ? ` - part ${part.n} of ${part.total}` : ""}.srt`,
+      () => "A Video",
       { warn: () => {}, error: () => {} },
       (fn) => {
         seen.timers.push(fn);
@@ -562,6 +615,26 @@ function check(name, cond, detail) {
     check("the badge returns to its clipboard glyph", btn.textContent === "📋" && btn.disabled === false, btn.textContent);
     check("the badge becomes a circle again", !btn.classes.has("my-yt-chunking"), [...btn.classes].join(","));
     check("the chapter tooltip is restored, not left on the chunk instruction", btn.title === "Copy transcript of chapter: Intro", btn.title);
+  }
+
+  // The main button's idle label follows the operation it is set to run: a
+  // remembered .srt download has to keep saying so when the flash ends, or the
+  // button would promise a copy the user no longer gets.
+  {
+    const copyBtn = makeButton({ mode: "copy" });
+    const srtBtn = makeButton({ mode: actionSrt });
+    const helpersCopy = wire({ chunks: chunkList, idx: 0, owner: copyBtn }).helpers;
+    await helpersCopy.resetMainButton(copyBtn);
+    check("a copy-mode button goes back to the transcript label", copyBtn.textContent === "📜 Transcript", copyBtn.textContent);
+
+    const helpersSrt = wire({ chunks: chunkList, idx: 0, owner: srtBtn }, srtBtn).helpers;
+    await helpersSrt.resetMainButton(srtBtn);
+    check(
+      "an SRT-mode button goes back to the SRT label",
+      srtBtn.textContent === "📜 Transcript · SRT",
+      srtBtn.textContent
+    );
+    check("...with no data-orig glyph, so it stays the main button", srtBtn.getAttribute("data-orig") === null, String(srtBtn.getAttribute("data-orig")));
   }
 
   // The main button keeps its wordier labels (it has room for them).
@@ -653,6 +726,93 @@ function check(name, cond, detail) {
     check("an English page keeps ASCII counter digits", seen.labelsWhileWriting[0] === "⏳0/3" && btn.textContent === "⏭1/3 · 11%", `${seen.labelsWhileWriting[0]} / ${btn.textContent}`);
   }
 
+  // The SRT batcher drives the same session machinery as the copy batcher: its
+  // parts are cue lists saved as files (the main button) or pasted as subtitle
+  // text (a chapter badge). What separates the three is only the write target
+  // and the wording, so both are pinned here - a session that saved to the
+  // clipboard while meaning to download (or the reverse) would look like a
+  // successful operation.
+  {
+    const btn = makeButton();
+    const part = (n, len) => ({
+      n,
+      total: 2,
+      title: "",
+      body: "b".repeat(len),
+      text: "x".repeat(len),
+      cueCount: 1,
+      words: 1,
+    });
+    const files = [];
+    const session = {
+      chunks: [part(1, 10), part(2, 30)],
+      idx: 0,
+      owner: btn,
+      write: "file",
+      mode: "srt",
+      title: "A Video",
+    };
+    const { helpers, seen, stats } = wire(session, btn, buildCountText(), buildPercentText(), buildUi().t, files);
+    await helpers.copyNextChunk(btn);
+    check(
+      "a download session saves a file instead of writing to the clipboard",
+      files.length === 1 && seen.writes.length === 0,
+      JSON.stringify({ files: files.length, writes: seen.writes.length })
+    );
+    check(
+      "...named after the video, with the part number in the name",
+      files[0] && files[0].name === "A Video - part 1 of 2.srt",
+      files[0] && files[0].name
+    );
+    check(
+      "the main button's SRT label says what it saved",
+      seen.labelsWhileWriting[0] === "⏳ SRT 0/2" && btn.textContent === "⤓ SRT 1/2 · 26%",
+      `${seen.labelsWhileWriting[0]} / ${btn.textContent}`
+    );
+    check(
+      "...and the report says the operation was an SRT one",
+      stats.out === "srt" && stats.rows === 1,
+      JSON.stringify({ out: stats.out, rows: stats.rows })
+    );
+  }
+
+  {
+    const btn = makeButton({ orig: "⏱", tip: "Copy this chapter's subtitles as SRT text: Intro" });
+    const part = (n, len) => ({
+      n,
+      title: "Intro",
+      body: "b".repeat(len),
+      text: "t".repeat(len),
+      cueCount: 1,
+      words: 1,
+    });
+    const files = [];
+    const session = {
+      chunks: [part(1, 10), part(2, 30)],
+      idx: 0,
+      owner: btn,
+      write: "clipboard",
+      mode: "srt",
+    };
+    const { helpers, seen } = wire(session, btn, buildCountText(), buildPercentText(), buildUi().t, files);
+    await helpers.copyNextChunk(btn);
+    check(
+      "a chapter's SRT session writes to the clipboard, never to a file",
+      seen.writes.length === 1 && files.length === 0,
+      JSON.stringify({ files: files.length, writes: seen.writes.length })
+    );
+    check(
+      "...with the compact SRT count in place of the transcript's words",
+      seen.labelsWhileWriting[0] === "⏳0/2" && btn.textContent === "⤓1/2",
+      `${seen.labelsWhileWriting[0]} / ${btn.textContent}`
+    );
+    check(
+      "...and the SRT wording in the tooltip",
+      btn.title.startsWith("Save part 1 of 2 (Intro), then click again for part 2."),
+      btn.title
+    );
+  }
+
   // The chapter copy path that owns the session (copyChapterRows).
   {
     const rowsSrc = src.slice(
@@ -673,6 +833,11 @@ function check(name, cond, detail) {
       "rowsLength",
       "copyNextChunk",
       "copyRowsWithSplitFallback",
+      "buildSrtParts",
+      "SRT_CHUNK_THRESHOLD_WORDS",
+      "SRT_CHUNK_MAX_WORDS",
+      "copySrtWithSplitFallback",
+      "transcriptOptions",
       "setButtonState",
       "setChunkLabel",
       "resetMainButton",
@@ -718,6 +883,86 @@ function check(name, cond, detail) {
       b.disabled = false;
     };
 
+    // The chapter's SRT output is the same call with one flag, so its two
+    // collaborators are stubbed and observed: the SRT builder sees the chapter's
+    // own rows, and it is the SRT write that runs - never the clipboard one.
+    const srtChapterRun = async ({ parts, mode = "srt" } = {}) => {
+      const seen = { srtCopies: [], generated: null, printed: [] };
+      const helpers = buildChapterCopy(
+        null,
+        () => ({ title: "", start: 0, end: Infinity }),
+        buildChunksTiny,
+        50,
+        50,
+        rowsLength,
+        async () => "next chunk",
+        async (rows, splitBy, text) => {
+          seen.printed.push(text);
+          return "whole";
+        },
+        (span, rows) => {
+          seen.generated = { span, rows };
+          return parts;
+        },
+        50,
+        50,
+        async (p) => {
+          seen.srtCopies.push(p);
+          return "whole";
+        },
+        () => ({ format: "paragraph", header: "" }),
+        realSetButtonState,
+        realSetChunkLabel,
+        realReset,
+        {},
+        () => {},
+        () => {},
+        buildUi().t
+      );
+      const btn = makeChapterBadge();
+      const handled = await helpers.copyChapterRows(smallRows, chapter, btn, mode);
+      return { handled, btn, seen, helpers };
+    };
+
+    {
+      const parts = [{ n: 1, total: 1, title: "Huge", cueCount: 2, words: 4, body: "1\n00:00:00,000 --> 00:00:05,000\n000yyyyy\n\n", text: "SRT" }];
+      const { handled, btn, seen } = await srtChapterRun({ parts });
+      check("an SRT chapter copy is handled", handled === true, String(handled));
+      check(
+        "...from the chapter's own rows",
+        seen.generated && seen.generated.span === chapter && seen.generated.rows === smallRows,
+        JSON.stringify(seen.generated)
+      );
+      check(
+        "...through the SRT write, not the transcript write",
+        seen.srtCopies.length === 1 && seen.printed.length === 0,
+        JSON.stringify({ srt: seen.srtCopies.length, printed: seen.printed.length })
+      );
+      check("an SRT chapter that fits shows only a checkmark", btn.textContent === "✓", btn.textContent);
+    }
+
+    {
+      // A chapter whose SRT is over the word ceiling batches itself: the badge
+      // becomes the "n/N" control for its own sequence, and nothing is written
+      // until the user clicks again.
+      const parts = [
+        { n: 1, total: 2, title: "Huge", cueCount: 1, words: 40, body: "b", text: "srt part 1" },
+        { n: 2, total: 2, title: "Huge", cueCount: 1, words: 40, body: "b", text: "srt part 2" },
+      ];
+      const { seen, helpers } = await srtChapterRun({ parts });
+      check(
+        "an oversized chapter's SRT leaves a live session for the next click",
+        helpers.session() !== null && helpers.session().mode === "srt",
+        JSON.stringify(helpers.session())
+      );
+      check(
+        "...and it is the file-less clipboard session",
+        helpers.session().write === "clipboard",
+        String(helpers.session() && helpers.session().write)
+      );
+      check("nothing is written until the user clicks again", seen.srtCopies.length === 0, String(seen.srtCopies.length));
+    }
+
     // An oversized chapter whose first part cannot be written must not leave a
     // live session behind: the badge goes back to idle, so a later click has to
     // start over instead of silently resuming a copy the user thinks failed.
@@ -734,6 +979,11 @@ function check(name, cond, detail) {
           throw new Error("Clipboard write failed.");
         },
         async () => "whole",
+        () => [],
+        50,
+        50,
+        async () => "whole",
+        () => ({ format: "paragraph", header: "" }),
         realSetButtonState,
         realSetChunkLabel,
         realReset,
@@ -768,6 +1018,11 @@ function check(name, cond, detail) {
           writes.push(text);
           return "whole";
         },
+        () => [],
+        50,
+        50,
+        async () => "whole",
+        () => ({ format: "paragraph", header: "" }),
         realSetButtonState,
         realSetChunkLabel,
         realReset,
@@ -966,6 +1221,13 @@ function check(name, cond, detail) {
   const pillCls = (src.match(/const BADGE_PILL_CLS = "([^"]+)"/) || [])[1];
   const roomVar = (src.match(/const BADGE_ROOM_VAR = "([^"]+)"/) || [])[1];
   const roomGap = Number((src.match(/const BADGE_ROOM_GAP = (\d+)/) || [])[1]);
+  // The reservation is measured across EVERY badge the row carries (the
+  // transcript one and the SRT one), so their class names and the two gaps that
+  // make up the room have to be readable too.
+  const copyCls = (src.match(/const CHAPTER_BTN_CLS = "([^"]+)"/) || [])[1];
+  const srtCls = (src.match(/const CHAPTER_SRT_BTN_CLS = "([^"]+)"/) || [])[1];
+  const edgeGap = Number((src.match(/const BADGE_EDGE_GAP = (\d+)/) || [])[1]);
+  const airGap = Number((src.match(/const BADGE_AIR_GAP = (\d+)/) || [])[1]);
   const itemTags = [
     ...((src.match(/const CHAPTER_ITEM_SELECTOR = \[([\s\S]*?)\]\.join/) || [])[1] || "").matchAll(/"([^"]+)"/g),
   ].map((m) => m[1]);
@@ -974,8 +1236,21 @@ function check(name, cond, detail) {
     !!chunkCls && !!pillCls && !!roomVar && roomGap > 0 && itemTags.length === 2,
     `${chunkCls} / ${pillCls} / ${roomVar} / ${roomGap} / ${itemTags.join("|")}`
   );
+  check(
+    "both badge classes and both gaps are readable, and the gap is their sum",
+    !!copyCls && !!srtCls && copyCls !== srtCls && edgeGap + airGap === roomGap,
+    `${copyCls} / ${srtCls} / edge=${edgeGap} air=${airGap} room=${roomGap}`
+  );
+
 
   const css = fs.readFileSync("content.css", "utf8").replace(/\r\n/g, "\n");
+  check(
+    "content.css spaces the two badges by the edge gap the JS accounts for",
+    // The SRT badge's own inset is one edge, one 22px circle and the gap
+    // between them - two edges plus a badge, measured from the row's end.
+    new RegExp(`\\.${srtCls}\\s*\\{[^}]*inset-inline-end:\\s*${edgeGap * 2 + 22}px`).test(css),
+    `no .${srtCls} inset rule of ${edgeGap * 2 + 22}px`
+  );
   // The selector of the rule that carries the reservation, so both halves can be
   // checked: it has to cover every row whose badge sits beside the title (the
   // classic description rows AND the horizontal chapter-list items), and it must
@@ -1002,6 +1277,10 @@ function check(name, cond, detail) {
     "BADGE_PILL_CLS",
     "BADGE_ROOM_VAR",
     "BADGE_ROOM_GAP",
+    "BADGE_EDGE_GAP",
+    "BADGE_AIR_GAP",
+    "CHAPTER_BTN_CLS",
+    "CHAPTER_SRT_BTN_CLS",
     "CHAPTER_ITEM_SELECTOR",
     "setButtonState",
     "t",
@@ -1028,9 +1307,23 @@ function check(name, cond, detail) {
     row.matches = (sel) => String(sel).split(", ").includes(row.tag);
     return row;
   };
-  const makeBadge = ({ orig = "📋", width = 0, row = null } = {}) => {
+  const makeBadge = ({ orig = "📋", width = 0, row = null, cls = null } = {}) => {
     const btn = { textContent: orig || "", disabled: false, classes: new Set(), parentElement: row };
-    btn.classList = { add: (c) => btn.classes.add(c), remove: (c) => btn.classes.delete(c) };
+    if (cls) btn.classes.add(cls);
+    btn.classList = {
+      add: (c) => btn.classes.add(c),
+      remove: (c) => btn.classes.delete(c),
+      contains: (c) => btn.classes.has(c),
+    };
+    btn.style = {
+      setProperty: (k, v) => {
+        btn.props[k] = v;
+      },
+      removeProperty: (k) => {
+        delete btn.props[k];
+      },
+    };
+    btn.props = {};
     btn.getAttribute = (n) => (n === "data-orig" ? orig : null);
     btn.getBoundingClientRect = () => ({ width });
     return btn;
@@ -1041,6 +1334,10 @@ function check(name, cond, detail) {
     pillCls,
     roomVar,
     roomGap,
+    edgeGap,
+    airGap,
+    copyCls,
+    srtCls,
     itemTags.join(", "),
     (b, label, disabled) => {
       b.textContent = label;
@@ -1093,6 +1390,65 @@ function check(name, cond, detail) {
       "an unmeasurable badge reserves nothing rather than guessing",
       !unmeasuredRow.classes.has(pillCls) && unmeasuredRow.props[roomVar] === undefined,
       JSON.stringify({ cls: [...unmeasuredRow.classes], props: unmeasuredRow.props })
+    );
+  }
+
+  // A chapter row carries TWO badges - the transcript one and the SRT one - so
+  // the room the row keeps clear of the title is the whole strip, and a
+  // transcript badge grown into a pill pushes the SRT badge out by its own width
+  // instead of running underneath it.
+  {
+    // The row's two lookups, as reserveBadgeRoom and resetMainButton ask for
+    // them: every badge by class, and one by a COMPOUND class selector (a badge
+    // that is still showing a count).
+    const wireRow = (row, copyBadge, srtBadge) => {
+      row.querySelectorAll = () => [copyBadge, srtBadge];
+      row.querySelector = (sel) =>
+        String(sel)
+          .split(",")
+          .map((part) => part.trim().split(".").filter(Boolean))
+          .map((classes) => [copyBadge, srtBadge].find((b) => classes.every((c) => b.classList.contains(c))))
+          .find(Boolean) || null;
+    };
+
+    const twoRow = makeRow(itemTags[0]);
+    const copyBadge = makeBadge({ width: 96, row: twoRow, cls: copyCls });
+    const srtBadge = makeBadge({ orig: "⏱", width: 22, row: twoRow, cls: srtCls });
+    wireRow(twoRow, copyBadge, srtBadge);
+    helpers.setChunkLabel(copyBadge, "⏭2/5 · 43%", false);
+    check(
+      "a row holding both badges reserves the whole strip",
+      twoRow.props[roomVar] === `${96 + 22 + edgeGap + edgeGap + airGap}px`,
+      `${roomVar}=${twoRow.props[roomVar]}`
+    );
+    check(
+      "...and the SRT badge is pushed out by the pill's width",
+      srtBadge.props["inset-inline-end"] === `${edgeGap + 96 + edgeGap}px`,
+      JSON.stringify(srtBadge.props)
+    );
+
+    // Idle again: the strip is two circles, the room is the smaller one and the
+    // SRT badge goes back to its content.css position.
+    const idleRow = makeRow(itemTags[0]);
+    const idleCopy = makeBadge({ width: 22, row: idleRow, cls: copyCls });
+    const idleSrt = makeBadge({ orig: "⏱", width: 22, row: idleRow, cls: srtCls });
+    wireRow(idleRow, idleCopy, idleSrt);
+    helpers.setChunkLabel(idleSrt, "⤓1/3", false);
+    check(
+      "two circles reserve the two badges and the gap between them",
+      idleRow.props[roomVar] === `${22 + 22 + edgeGap + edgeGap + airGap}px`,
+      `${roomVar}=${idleRow.props[roomVar]}`
+    );
+    check(
+      "...and the SRT badge keeps its content.css position",
+      idleSrt.props["inset-inline-end"] === undefined,
+      JSON.stringify(idleSrt.props)
+    );
+    await helpers.resetMainButton(idleSrt);
+    check(
+      "the room goes back once both badges are idle",
+      !idleRow.classes.has(pillCls) && idleRow.props[roomVar] === undefined,
+      JSON.stringify({ cls: [...idleRow.classes], props: idleRow.props })
     );
   }
 

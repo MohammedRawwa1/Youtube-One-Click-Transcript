@@ -518,40 +518,81 @@ const track = (baseUrl, languageCode, kind) => (kind ? { baseUrl, languageCode, 
     remove() {},
   });
 
-  // The chapter badge in the description.
+  // The two chapter badges in the description: the transcript one and the SRT
+  // one. Both embed the chapter title in a sentence of their own, so both need
+  // the isolate - and they have to be told apart by their class, or the row
+  // would carry two identical controls.
   {
-    const fnSrc = extract("  function makeChapterButton(", "\n\n  function injectChapterButtons(");
-    const make = new Function("document", "CHAPTER_BTN_CLS", "isolateRtl", "copyChapterRange", "t", `return (${fnSrc});`)(
-      { createElement: () => makeEl() },
-      "my-yt-chapter-copy",
-      isolateRtl,
-      () => {},
-      buildUi().t
+    // The badge builder and the pair that uses it are one slice: makeChapterButtons
+    // calls makeChapterBadge, so extracting only the second would leave it
+    // undefined.
+    const fnSrc = extract("  function makeChapterBadge(", "\n\n  function injectChapterButtons(");
+    const build = (t) =>
+      new Function(
+        "document",
+        "CHAPTER_BTN_CLS",
+        "CHAPTER_SRT_BTN_CLS",
+        "isolateRtl",
+        "copyChapterRange",
+        "t",
+        // Two declarations in the slice, so the pair is returned by name rather
+        // than wrapped as one expression.
+        `${fnSrc}\n    return makeChapterButtons;`
+      )(
+        { createElement: () => makeEl() },
+        "my-yt-chapter-copy",
+        "my-yt-srt-copy",
+        isolateRtl,
+        () => {},
+        t
+      );
+    const make = build(buildUi().t);
+    const arabic = make({ title: "المقدمة", start: 0, end: 10 });
+    const arabicCopy = arabic[0];
+    const arabicSrt = arabic[1];
+    check(
+      "the row gets one transcript badge and one SRT badge",
+      arabic.length === 2 && arabicCopy.className === "my-yt-chapter-copy" && arabicSrt.className === "my-yt-srt-copy",
+      arabic.map((b) => b.className).join(",")
     );
-    const arabic = make(null, { title: "المقدمة", start: 0, end: 10 });
-    check("chapter badge tooltip isolates an Arabic title", arabic.title === "Copy transcript of chapter: \u2068المقدمة\u2069", arabic.title);
+    check("chapter badge tooltip isolates an Arabic title", arabicCopy.title === "Copy transcript of chapter: \u2068المقدمة\u2069", arabicCopy.title);
     check(
       "...and the tooltip restored when a chunk session ends carries it too",
-      arabic.attrs["data-tip"] === arabic.title && arabic.attrs["aria-label"] === arabic.title,
-      JSON.stringify(arabic.attrs)
+      arabicCopy.attrs["data-tip"] === arabicCopy.title && arabicCopy.attrs["aria-label"] === arabicCopy.title,
+      JSON.stringify(arabicCopy.attrs)
     );
-    const latin = make(null, { title: "Intro", start: 0, end: 10 });
-    check("a Latin chapter tooltip is byte-identical to before", latin.title === "Copy transcript of chapter: Intro", latin.title);
+    check(
+      "the SRT badge isolates the same title in its own sentence",
+      arabicSrt.title === "Copy this chapter's subtitles as SRT text: \u2068المقدمة\u2069",
+      arabicSrt.title
+    );
+    check(
+      "...and keeps it in the tooltip a chunk session restores",
+      arabicSrt.attrs["data-tip"] === arabicSrt.title,
+      JSON.stringify(arabicSrt.attrs)
+    );
+
+    const latin = make({ title: "Intro", start: 0, end: 10 });
+    check("a Latin chapter tooltip is byte-identical to before", latin[0].title === "Copy transcript of chapter: Intro", latin[0].title);
+    check(
+      "an untitled row falls back to the plain tooltips on both badges",
+      make(null).map((b) => b.title).join(" | ") ===
+        "Copy transcript of this chapter | Copy this chapter's subtitles as SRT text",
+      make(null).map((b) => b.title).join(" | ")
+    );
 
     // ...and with the label table switched to Arabic, the whole sentence is
     // Arabic while the title keeps its own isolate.
-    const makeAr = new Function("document", "CHAPTER_BTN_CLS", "isolateRtl", "copyChapterRange", "t", `return (${fnSrc});`)(
-      { createElement: () => makeEl() },
-      "my-yt-chapter-copy",
-      isolateRtl,
-      () => {},
-      buildUi({ ui: "ar" }).t
-    );
-    const arBadge = makeAr(null, { title: "المقدمة", start: 0, end: 10 });
+    const [arBadge, arSrt] = build(buildUi({ ui: "ar" }).t)({ title: "المقدمة", start: 0, end: 10 });
     check(
       "an Arabic UI tooltip is one Arabic sentence around the isolated title",
       arBadge.title === "نسخ نص الفصل: \u2068المقدمة\u2069",
       arBadge.title
+    );
+    check(
+      "...and so is the SRT badge's",
+      arSrt.title === "نسخ ترجمة هذا الفصل كنص SRT: \u2068المقدمة\u2069",
+      arSrt.title
     );
   }
 
@@ -636,6 +677,7 @@ const track = (baseUrl, languageCode, kind) => (kind ? { baseUrl, languageCode, 
     const lastStats = {
       label,
       source: "panel",
+      out: "copy",
       rows: 1120,
       panelRows: 1120,
       sweep: false,
@@ -673,7 +715,11 @@ const track = (baseUrl, languageCode, kind) => (kind ? { baseUrl, languageCode, 
 
   const arabic = render("Chapter: المقدمة");
   check("the overlay isolates an RTL label so the diagnostics keep their order", arabic.summary.includes("\u2068Chapter: المقدمة\u2069"), arabic.summary);
-  check("...the diagnostics are still all there", /source=panel rows=1120/.test(arabic.summary), arabic.summary);
+  check(
+    "...the diagnostics are still all there",
+    /source=panel out=copy rows=1120/.test(arabic.summary),
+    arabic.summary
+  );
   check(
     "...and the copied JSON report stays free of bidi controls",
     !/\u2066|\u2068|\u2069/.test(arabic.report) && arabic.report.includes('"label": "Chapter: المقدمة"'),
@@ -685,9 +731,19 @@ const track = (baseUrl, languageCode, kind) => (kind ? { baseUrl, languageCode, 
   // The chapter badge is positioned logically, so a mirrored RTL watch page
   // cannot put it on top of the chapter title it belongs to.
   const css = fs.readFileSync("content.css", "utf8").replace(/\r\n/g, "\n");
-  const badgeRule = css.slice(css.indexOf(".my-yt-chapter-copy {"), css.indexOf(".my-yt-chapter-copy:hover"));
+  // The badge rules are shared by the transcript badge and the SRT badge, so the
+  // rule under test is the pair's own block.
+  const badgeRule = css.slice(
+    css.indexOf(".my-yt-chapter-copy,\n.my-yt-srt-copy {"),
+    css.indexOf(".my-yt-chapter-copy:hover")
+  );
   check("the chapter badge uses a logical inline-end inset", /inset-inline-end: 6px/.test(badgeRule), badgeRule.replace(/\s+/g, " ").slice(0, 120));
   check("...and no physical `right` offset", !/^\s*right:/m.test(badgeRule), "a physical right offset is still there");
+  check(
+    "the SRT badge beside it is offset logically too",
+    /\.my-yt-srt-copy \{\s*inset-inline-end: 34px/.test(css),
+    "no logical inset on the SRT badge"
+  );
   check("the overlay is positioned logically too", /inset-inline-end: 16px/.test(css), "no logical inset on the overlay");
   check(
     "the overlay text is direction-neutral for display",
@@ -895,8 +951,18 @@ const track = (baseUrl, languageCode, kind) => (kind ? { baseUrl, languageCode, 
   const arTable = new Function(`${uiSrc}\n    return UI_STRINGS.ar;`)();
   check(
     "no diagnostic field name is translated",
-    Object.keys(arTable).every((k) => /^(button|badge|chapter|player|chunk|label|debug|error)\./.test(k)),
-    Object.keys(arTable).filter((k) => !/^(button|badge|chapter|player|chunk|label|debug|error)\./.test(k)).join(",")
+    // The namespaces are what separates a UI label from a report field: a
+    // translated key must live under one of these, never under a field name the
+    // debug report prints. `srt.*`, `menu.*` and `settings.*` are label
+    // namespaces like the rest - nothing in the report is ever named after them.
+    Object.keys(arTable).every((k) =>
+      /^(button|badge|chapter|player|chunk|label|debug|error|srt|menu|settings)\./.test(k)
+    ),
+    Object.keys(arTable)
+      .filter(
+        (k) => !/^(button|badge|chapter|player|chunk|label|debug|error|srt|menu|settings)\./.test(k)
+      )
+      .join(",")
   );
   check(
     "the Arabic table covers every English key",

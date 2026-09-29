@@ -169,14 +169,19 @@ const readCss = () => fs.readFileSync("content.css", "utf8");
 const num = (src, name) => Number((src.match(new RegExp(`const ${name} = (\\d+)`)) || [])[1]);
 const str = (src, name) => (src.match(new RegExp(`const ${name} = "([^"]+)"`)) || [])[1];
 
-// The four things that have to agree: what the JS sets, what the CSS matches,
-// which rows it matches on, and the gap between the pill and the text.
+// The things that have to agree: what the JS sets, what the CSS matches, which
+// rows it matches on, the gaps the reservation is built from, and the two badge
+// classes that share a chapter row.
 function readContract(src) {
   const contract = {
     chunkCls: str(src, "CHUNK_LABEL_CLS"),
     pillCls: str(src, "BADGE_PILL_CLS"),
     roomVar: str(src, "BADGE_ROOM_VAR"),
     roomGap: num(src, "BADGE_ROOM_GAP"),
+    edgeGap: num(src, "BADGE_EDGE_GAP"),
+    airGap: num(src, "BADGE_AIR_GAP"),
+    copyCls: str(src, "CHAPTER_BTN_CLS"),
+    srtCls: str(src, "CHAPTER_SRT_BTN_CLS"),
     chapterTags: [
       ...((src.match(/const CHAPTER_ITEM_SELECTOR = \[([\s\S]*?)\]\.join/) || [])[1] || "").matchAll(/"([^"]+)"/g),
     ].map((m) => m[1]),
@@ -195,10 +200,8 @@ function readContract(src) {
 const LONG_TITLE =
   "Building the whole thing from scratch, part three: wiring the collector to the batcher and checking every boundary case along the way, with a deliberately long chapter title so the row is filled end to end";
 const LONG_TITLE_AR =
-  "بناء المشروع من الصفر، الجزء الثالث: ربط المجمّع بالدُفعات والتحقق من كل حالة على الحدود أثناء العمل، مع عنوان فصل طويل عن قصد حتى يمتلئ الصف من أوله إلى آخره";
-
-const badge = (id, extra = "") =>
-  `<button type="button" class="my-yt-chapter-copy" data-orig="📋" ${id ? `id="${id}"` : ""} ${extra}>📋</button>`;
+  "بناء المشروع من الصفر، الجزء الثالث: ربط المجمّع بالدُفعات والتحقق من كل حالة على الحدود أثناء العمل، مع عنوان فصل طويل عن قصد حتى يمتلئ الصف من أوله إلى آخره";const badge = (id, { cls = "my-yt-chapter-copy", glyph = "📋", extra = "" } = {}) =>
+  `<button type="button" class="${cls}" data-orig="${glyph}" ${id ? `id="${id}"` : ""} ${extra}>${glyph}</button>`;
 
 function fixtureHtml(css) {
   return `<!doctype html>
@@ -244,6 +247,18 @@ ytd-macro-markers-list-item-renderer[layout="VERTICAL"] .chapter-title { display
       <div class="chapter-time">١٢:٣٤</div>
       <div class="chapter-title" id="title-rtl">${LONG_TITLE_AR}</div>
       ${badge("badge-rtl")}
+    </ytd-video-description-chapter-thumbnail-renderer>
+  </div>
+
+  <!-- A chapter row carrying BOTH badges: the transcript one and, beside it, the
+       SRT one. The reservation has to cover the pair, and a transcript pill may
+       not end up on top of the SRT badge next to it. -->
+  <div class="desc">
+    <ytd-video-description-chapter-thumbnail-renderer class="row" id="row-pair">
+      <div class="chapter-time">12:34</div>
+      <div class="chapter-title" id="title-pair">${LONG_TITLE}</div>
+      ${badge("badge-pair")}
+      ${badge("badge-pair-srt", { cls: "my-yt-srt-copy", glyph: "⏱" })}
     </ytd-video-description-chapter-thumbnail-renderer>
   </div>
 
@@ -325,6 +340,10 @@ window.__ytxtBuild = (parts) => {
     "BADGE_PILL_CLS",
     "BADGE_ROOM_VAR",
     "BADGE_ROOM_GAP",
+    "BADGE_EDGE_GAP",
+    "BADGE_AIR_GAP",
+    "CHAPTER_BTN_CLS",
+    "CHAPTER_SRT_BTN_CLS",
     "CHAPTER_ITEM_SELECTOR",
     "setButtonState",
     "t",
@@ -334,6 +353,10 @@ window.__ytxtBuild = (parts) => {
     contract.pillCls,
     contract.roomVar,
     contract.roomGap,
+    contract.edgeGap,
+    contract.airGap,
+    contract.copyCls,
+    contract.srtCls,
     contract.chapterTags.join(", "),
     (b, label, disabled) => {
       b.textContent = label;
@@ -360,6 +383,9 @@ window.__ytxtMeasure = async (labels, { reserve }) => {
   const cases = [
     { id: "classic row (badge beside title)", row: "#row-classic", badge: "#badge-classic", title: "#title-classic", expectRoom: true },
     { id: "classic row, RTL", row: "#row-rtl", badge: "#badge-rtl", title: "#title-rtl", expectRoom: true },
+    // The same row with the SRT badge next to the transcript badge: two badges
+    // share the strip, and the room reserved has to cover both.
+    { id: "classic row with the SRT badge", row: "#row-pair", badge: "#badge-pair", title: "#title-pair", srt: "#badge-pair-srt", expectRoom: true },
     { id: "horizontal chapter item", row: "#row-horizontal", badge: "#badge-horizontal", title: "#title-horizontal", expectRoom: true },
     { id: "vertical chapter card", row: "#row-vertical", badge: "#badge-vertical", title: "#title-vertical", expectRoom: false },
     { id: "player bar", row: "#player-bar", badge: "#my-yt-player-chapter-btn", title: "#title-player", expectRoom: false },
@@ -369,6 +395,7 @@ window.__ytxtMeasure = async (labels, { reserve }) => {
     const row = document.querySelector(c.row);
     const btn = document.querySelector(c.badge);
     const title = document.querySelector(c.title);
+    const srt = c.srt ? document.querySelector(c.srt) : null;
     if (getComputedStyle(row).position === "static") row.style.position = "relative";
 
     // Idle first: the circle the badge spends most of its life as.
@@ -386,10 +413,14 @@ window.__ytxtMeasure = async (labels, { reserve }) => {
       if (!reserve) {
         row.classList.remove(contract.pillCls);
         row.style.removeProperty(contract.roomVar);
+        // ...and the SRT badge goes back to its content.css offset, which is
+        // what a transcript pill used to (and must not) run under.
+        if (srt) srt.style.removeProperty("inset-inline-end");
       }
       const b = box(btn);
       const tl = box(title);
       const rw = box(row);
+      const sb = srt ? box(srt) : null;
       out.push({
         case: c.id,
         label,
@@ -404,6 +435,11 @@ window.__ytxtMeasure = async (labels, { reserve }) => {
         titleWidth: Math.round(tl.w * 10) / 10,
         overlap: hits(b, tl),
         escapesRow: b.x < rw.x - 0.5 || b.right > rw.right + 0.5,
+        pair: !!srt,
+        srtWidth: sb ? Math.round(sb.w * 10) / 10 : 0,
+        // The pill must not end up on top of the badge beside it - the same
+        // failure the title would suffer, one badge over.
+        srtOverlap: sb ? hits(b, sb) : false,
         expectRoom: c.expectRoom,
       });
     }
@@ -423,6 +459,11 @@ window.__ytxtMeasure = async (labels, { reserve }) => {
       titleWidth: Math.round(back.w * 10) / 10,
       overlap: hits(box(btn), back),
       escapesRow: false,
+      pair: !!srt,
+      srtWidth: srt ? Math.round(box(srt).w * 10) / 10 : 0,
+      srtOverlap: srt ? hits(box(btn), box(srt)) : false,
+      // An idle row gives the pushed-out SRT badge its content.css offset back.
+      srtInset: srt ? srt.style.getPropertyValue("inset-inline-end") : "",
       restored: Math.abs(back.w - idleTitleWidth) < 1 && idlePadding === reservedRoom(row),
       expectRoom: c.expectRoom,
     });
@@ -441,7 +482,9 @@ async function main() {
   const logic = badgeLogicSource(src, contract);
   log(
     "contract:",
-    `${contract.chunkCls} / ${contract.pillCls} / ${contract.roomVar} / gap=${contract.roomGap} / rows=${contract.chapterTags.join(",")}`
+    `${contract.chunkCls} / ${contract.pillCls} / ${contract.roomVar} / gap=${contract.roomGap}` +
+      ` (edge ${contract.edgeGap} + air ${contract.airGap}) / badges=${contract.copyCls}+${contract.srtCls}` +
+      ` / rows=${contract.chapterTags.join(",")}`
   );
 
   const bin = findChrome();
@@ -452,6 +495,13 @@ async function main() {
     console.log(`${cond ? "PASS" : "FAIL"}  ${name}${cond ? "" : "  -> " + detail}`);
     if (!cond) failures++;
   };
+  check(
+    "the two badge classes are distinct and their gaps make up the reserve",
+    contract.copyCls !== contract.srtCls &&
+      contract.edgeGap + contract.airGap === contract.roomGap &&
+      contract.edgeGap > 0,
+    JSON.stringify(contract)
+  );
   try {
     const version = await waitForDevtools();
     cdp = await CDP.connect(version.webSocketDebuggerUrl);
@@ -544,6 +594,13 @@ async function main() {
           !r.reserved && !r.room && r.reservedRoom === r.basePad && r.restored !== false,
           JSON.stringify({ reserved: r.reserved, room: r.room, padEnd: r.reservedRoom, basePad: r.basePad, restored: r.restored })
         );
+        if (r.pair) {
+          check(
+            `${r.case}: an idle row leaves the SRT badge at its own offset`,
+            !r.srtInset && !r.srtOverlap,
+            JSON.stringify({ inset: r.srtInset, overlap: r.srtOverlap })
+          );
+        }
         continue;
       }
       check(
@@ -552,6 +609,13 @@ async function main() {
         `pill=${r.pillWidth}px, title ${r.titleWidth}px, reserved ${r.reservedRoom}px`
       );
       check(`${r.case}: ${r.label} stays inside its row`, !r.escapesRow, "the badge left the row's box");
+      if (r.pair) {
+        check(
+          `${r.case}: ${r.label} does not cover the SRT badge beside it`,
+          !r.srtOverlap,
+          `pill=${r.pillWidth}px, srt=${r.srtWidth}px, reserved ${r.reservedRoom}px`
+        );
+      }
     }
 
     // The reservation has to be the one the pill measured - a class no rule
@@ -560,11 +624,15 @@ async function main() {
     for (const r of reserved) {
       if (r.label === "(idle)") continue;
       const added = Math.round((r.reservedRoom - r.basePad) * 10) / 10;
+      // A row holding both badges has to keep the SRT badge's width and the gap
+      // between them as well - the reservation covers the whole strip.
+      const extra = r.pair ? r.srtWidth + contract.edgeGap : 0;
       if (r.expectRoom) {
         check(
           `${r.case}: the row reserved the pill's own width (${r.label})`,
-          Math.abs(added - (r.pillWidth + contract.roomGap)) <= 1.5,
-          `added ${added}px, pill=${r.pillWidth}px + gap ${contract.roomGap}px`
+          Math.abs(added - (r.pillWidth + contract.roomGap + extra)) <= 1.5,
+          `added ${added}px, pill=${r.pillWidth}px + gap ${contract.roomGap}px` +
+            (r.pair ? ` + srt ${r.srtWidth}px + ${contract.edgeGap}px` : "")
         );
       } else {
         check(

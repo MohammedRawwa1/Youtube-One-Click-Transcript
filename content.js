@@ -117,8 +117,30 @@
   // Between the pill and the text it must not touch: the badge's own 6px inset
   // (content.css) plus a little air.
   const BADGE_ROOM_GAP = 10;
+  // The same reserve, taken apart: the 6px inset from the row's inline edge and
+  // the 6px that separates two badges on one row, plus the air above. Both
+  // badges - the transcript one and the SRT one - share the strip, so a row
+  // carrying the pair has to keep BADGE_EDGE_GAP more than a row carrying one.
+  const BADGE_EDGE_GAP = 6;
+  const BADGE_AIR_GAP = 4;
   const PLAYER_BTN_ID = "my-yt-player-chapter-btn";
   const DEBUG_OVERLAY_ID = "my-yt-debug-overlay";
+  // The main button is a SPLIT control: the button itself copies, and the small
+  // caret beside it opens the action menu (copy the transcript / download the
+  // subtitles as .srt). Both live in a wrapper so the page's own flex row lays
+  // them out as one control instead of two unrelated buttons.
+  const SPLIT_WRAP_ID = "my-yt-transcript-split";
+  const CARET_ID = "my-yt-transcript-caret";
+  const MENU_ID = "my-yt-transcript-menu";
+  // The settings bubble: a small button in the description's action row - the
+  // one holding YouTube's own "Show transcript" button and the ⋮ menu whose
+  // single item is "Report" - which opens a bubble just above that row.
+  const SETTINGS_BTN_ID = "my-yt-settings-btn";
+  const SETTINGS_POPUP_ID = "my-yt-settings-popup";
+  // The second badge on a chapter row: the same chapter, as SRT text (see
+  // makeChapterSrtButton). It sits beside the transcript badge; content.css
+  // positions the pair and reserveBadgeRoom keeps both clear of the title.
+  const CHAPTER_SRT_BTN_CLS = "my-yt-srt-copy";
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   // Cache of parsed chapter data, keyed by video id
@@ -196,6 +218,17 @@
   // operations can be retuned without touching each other.
   const CHAPTER_CHUNK_THRESHOLD = 1000000; // characters
   const CHAPTER_CHUNK_MAX_CHARS = 1000000; // characters
+  // ---- SRT downloads (the main button's caret menu) ----
+  // The third batcher, and the only one measured in WORDS rather than
+  // characters: a subtitle file is judged by the speech it holds, and the
+  // timestamp/index overhead each cue carries (~40 characters) is noise next to
+  // the text itself. 500k words is roughly a 50-hour recording - past that, a
+  // single .srt is not something any editor wants to open, so the download is
+  // split into ordered part files exactly the way a long copy is split into
+  // ordered parts (see buildSrtParts). Like the other two pairs, these numbers
+  // are this batcher's own and are never borrowed from the clipboard ones.
+  const SRT_CHUNK_THRESHOLD_WORDS = 500000; // words
+  const SRT_CHUNK_MAX_WORDS = 500000; // words
   // Active chunk session, for the main Transcript button or for a single
   // chapter button whose chapter is too long for one clipboard write.
   // `owner` is the button that started it, so a click on a different button
@@ -222,6 +255,7 @@
   const lastStats = {
     label: "",
     source: "none",   // "panel" | "captions" | "chunks"
+    out: "copy",      // "copy" | "srt" - what the operation produced
     rows: 0,          // rows that made it into the copied text
     panelRows: 0,     // rows the panel collector gathered
     sweep: false,     // repair sweep ran
@@ -260,6 +294,7 @@
     Object.assign(lastStats, {
       label,
       source: "none",
+      out: "copy",
       rows: 0,
       panelRows: 0,
       sweep: false,
@@ -284,7 +319,7 @@
     s.durationMs = Date.now() - statsStartedAt;
     console.info(
       `[YT-Transcript] ${s.label} ` +
-        `source=${s.source} rows=${s.rows} panelRows=${s.panelRows} ` +
+        `source=${s.source} out=${s.out} rows=${s.rows} panelRows=${s.panelRows} ` +
         `sweep=${s.sweep ? "yes(" + s.sweepSteps + ")" : "no"} incomplete=${s.incomplete} ` +
         `fallbacks=${s.fallbacks}${s.capSource ? " capSource=" + s.capSource : ""}${s.capLang ? " capLang=" + s.capLang : ""}${s.capLangMismatch ? " capLangMismatch=yes" : ""}${s.capRetries ? " retries=" + s.capRetries : ""} range=${s.range} ${s.durationMs}ms` +
         (s.progress === null || s.progress === undefined ? "" : ` progress=${s.progress}%`) +
@@ -314,7 +349,7 @@
     // deliberately NOT isolated: it is what the Copy report button puts on the
     // clipboard and has to stay byte-identical for tooling.
     const summary =
-      `${isolateRtl(s.label)} — source=${s.source} rows=${s.rows} panelRows=${s.panelRows} ` +
+      `${isolateRtl(s.label)} — source=${s.source} out=${s.out} rows=${s.rows} panelRows=${s.panelRows} ` +
       `sweep=${s.sweep ? "yes(" + s.sweepSteps + ")" : "no"} incomplete=${s.incomplete} ` +
       `fallbacks=${s.fallbacks}${s.capSource ? " capSource=" + s.capSource : ""}${s.capRetries ? " retries=" + s.capRetries : ""} range=${s.range} ${s.durationMs}ms` +
       (s.progress === null || s.progress === undefined ? "" : ` progress=${s.progress}%`) +
@@ -601,6 +636,7 @@
   const UI_STRINGS = {
     en: {
       "button.idle": "📜 Transcript",
+      "button.idleSrt": "📜 Transcript · SRT",
       "button.copying": "⏳ Copying...",
       "button.copied": "✓ Copied!",
       "button.failed": "❌ Failed",
@@ -619,6 +655,42 @@
       "player.noChapterTip": "Copy transcript of current chapter",
       "chunk.instruction": "Paste chunk {n} ({title}) somewhere first, then click again to copy chunk {next} ({nextTitle}).",
       "chunk.progress": "{pct} of the transcript copied so far.",
+      "menu.tip": "More transcript actions",
+      "menu.copy": "📋 Copy transcript",
+      "menu.srt": "⤓ Download .srt file",
+      "menu.srtHint": "SubRip subtitles, split into ordered part files when the transcript is huge.",
+      "menu.current": "This is what the Transcript button does now.",
+      "menu.remember": "Your choice is remembered: clicking the button does it again.",
+      "settings.tip": "Transcript settings (title line, format, timestamps)",
+      "settings.title": "Transcript settings",
+      "settings.includeTitle": "Include video title",
+      "settings.includeTitleHint": "Start the copy with the video's title on its own line.",
+      "settings.formatGroup": "Format",
+      "settings.formatParagraph": "Format as a single paragraph (no timestamps)",
+      "settings.formatLines": "Include timestamps (line-by-line)",
+      "settings.timeGroup": "Timestamp style (line-by-line)",
+      "settings.timeBracket": "[0:05] Segment text",
+      "settings.timePlain": "0:05 Segment text",
+      "settings.timeParen": "(0:05) Segment text",
+      "settings.srtNote": "A .srt download always carries its own timestamps, and the video title goes into the file name.",
+      "settings.saved": "Saved",
+      "settings.close": "Close settings",
+      "srt.copyTip": "Copy this chapter's subtitles as SRT text: {title}",
+      "srt.noTitleTip": "Copy this chapter's subtitles as SRT text",
+      "srt.buttonCopying": "⏳ SRT {count}",
+      "srt.buttonNext": "⤓ SRT {count} · {pct}",
+      "srt.buttonDone": "✓ All SRT parts saved!",
+      "srt.badgeCopying": "⏳{count}",
+      "srt.badgeNext": "⤓{count}",
+      "srt.chunkInstruction": "Save part {n} of {total} ({title}), then click again for part {next}.",
+      "srt.progress": "{pct} of the subtitles saved so far.",
+      "srt.downloading": "⤓ .srt",
+      "srt.downloaded": "✓ Saved",
+      "srt.failed": "❌ SRT failed",
+      "srt.labelFull": "Full transcript (SRT)",
+      "srt.labelChapter": "Chapter: {title} (SRT)",
+      "srt.labelChapterGeneric": "Chapter (SRT)",
+      "srt.labelChunk": "SRT part {n}/{total}",
       "label.full": "Full transcript",
       "label.chapter": "Chapter: {title}",
       "label.chapterGeneric": "Chapter",
@@ -641,6 +713,7 @@
     },
     ar: {
       "button.idle": "📜 النص",
+      "button.idleSrt": "📜 النص · SRT",
       "button.copying": "⏳ جارٍ النسخ...",
       "button.copied": "✓ تم النسخ!",
       "button.failed": "❌ فشل النسخ",
@@ -659,6 +732,42 @@
       "player.noChapterTip": "نسخ نص الفصل الحالي",
       "chunk.instruction": "الصق الجزء {n} ({title}) في مكان ما أولًا، ثم انقر مرة أخرى لنسخ الجزء {next} ({nextTitle}).",
       "chunk.progress": "تم نسخ {pct} من النص حتى الآن.",
+      "menu.tip": "إجراءات أخرى للنص",
+      "menu.copy": "📋 نسخ النص",
+      "menu.srt": "⤓ تنزيل ملف SRT",
+      "menu.srtHint": "ترجمة بصيغة SubRip، مقسّمة إلى ملفات أجزاء مرتّبة إذا كان النص ضخمًا.",
+      "menu.current": "هذا ما يفعله زر النص الآن.",
+      "menu.remember": "يُحفظ اختيارك: النقر على الزر ينفّذه مرة أخرى.",
+      "settings.tip": "إعدادات النص (سطر العنوان، التنسيق، الطوابع الزمنية)",
+      "settings.title": "إعدادات النص",
+      "settings.includeTitle": "تضمين عنوان الفيديو",
+      "settings.includeTitleHint": "ابدأ النص بعنوان الفيديو في سطر مستقل.",
+      "settings.formatGroup": "التنسيق",
+      "settings.formatParagraph": "تنسيق كفقرة واحدة (بدون طوابع زمنية)",
+      "settings.formatLines": "تضمين الطوابع الزمنية (سطرًا بسطر)",
+      "settings.timeGroup": "شكل الطابع الزمني (سطرًا بسطر)",
+      "settings.timeBracket": "[0:05] نص المقطع",
+      "settings.timePlain": "0:05 نص المقطع",
+      "settings.timeParen": "(0:05) نص المقطع",
+      "settings.srtNote": "ملف SRT يحمل طوابعه الزمنية دائمًا، ويُحمل عنوان الفيديو في اسم الملف.",
+      "settings.saved": "تم الحفظ",
+      "settings.close": "إغلاق الإعدادات",
+      "srt.copyTip": "نسخ ترجمة هذا الفصل كنص SRT: {title}",
+      "srt.noTitleTip": "نسخ ترجمة هذا الفصل كنص SRT",
+      "srt.buttonCopying": "⏳ SRT {count}",
+      "srt.buttonNext": "⤓ SRT {count} · {pct}",
+      "srt.buttonDone": "✓ تم حفظ كل أجزاء SRT!",
+      "srt.badgeCopying": "⏳{count}",
+      "srt.badgeNext": "⤓{count}",
+      "srt.chunkInstruction": "احفظ الجزء {n} من {total} ({title}) ثم انقر مرة أخرى للجزء {next}.",
+      "srt.progress": "تم حفظ {pct} من الترجمة حتى الآن.",
+      "srt.downloading": "⤓ SRT",
+      "srt.downloaded": "✓ تم الحفظ",
+      "srt.failed": "❌ فشل SRT",
+      "srt.labelFull": "النص الكامل (SRT)",
+      "srt.labelChapter": "الفصل: {title} (SRT)",
+      "srt.labelChapterGeneric": "فصل (SRT)",
+      "srt.labelChunk": "جزء SRT {n}/{total}",
       "label.full": "النص الكامل",
       "label.chapter": "الفصل: {title}",
       "label.chapterGeneric": "فصل",
@@ -898,6 +1007,31 @@
     }
     const pr = pageDataForCurrentVideo("ytInitialPlayerResponse");
     return pr && pr.videoDetails ? pr : null;
+  }
+
+  // The title of the video that is on screen right now. Only used for the
+  // optional title line of a copy (see transcriptOptions) and for the name of a
+  // downloaded .srt file, so it is read through the same staleness guard as
+  // everything else here: the live player response first - it is checked
+  // against the video id in the URL, so a playlist jump cannot leave the
+  // previous video's title on the new video's copy - then the rendered <h1>.
+  function videoTitle() {
+    const pr = livePlayerResponse();
+    const fromPlayer = pr && pr.videoDetails && pr.videoDetails.title;
+    if (fromPlayer) return cleanSegmentText(fromPlayer);
+    const scopes = [
+      "ytd-watch-metadata h1.ytd-watch-metadata",
+      "#title h1",
+      "h1.ytd-video-primary-info-renderer",
+    ];
+    for (const sel of scopes) {
+      try {
+        const el = document.querySelector(sel);
+        const title = el ? cleanSegmentText(el.textContent) : "";
+        if (title) return title;
+      } catch (e) {}
+    }
+    return "";
   }
 
   // =========================================================
@@ -1407,7 +1541,14 @@
   // lands in exactly one part, in order, so the parts reassemble into the
   // source text byte for byte. That is asserted before returning - a partition
   // that would drop, duplicate or truncate text throws instead of being pasted.
-  function buildChunks(span, rows, maxChars) {
+  //
+  // `opts` is the text layer (see textOptions): the line format the rows are
+  // rendered in and the optional video-title header line. It is passed through
+  // to the splitter and to the losslessness check, so the sizes the parts are
+  // built to and the bodies they are checked against are measured the same way.
+  // Omitting it keeps the plain single-paragraph form the extension has always
+  // copied, byte for byte.
+  function buildChunks(span, rows, maxChars, opts) {
     // A part marker appended to a title in an RTL script (Arabic, Hebrew, ...)
     // is reordered by the bidi algorithm against that title - the paragraph
     // direction comes from the title's first strong character, so "(part 1/3)"
@@ -1419,6 +1560,7 @@
     const RTL_RE = /[\u0590-\u05ff\u0600-\u06ff\u0700-\u074f\u0750-\u077f\u08a0-\u08ff\ufb1d-\ufdff\ufe70-\ufeff]/;
     const partMarker = (marker, title) =>
       RTL_RE.test(title) ? "\u2066" + marker + "\u2069" : marker;
+    const txt = textOptions(opts);
     const chunks = [];
     const spanRows = rows.filter((r) => r.t >= span.start - 0.6 && r.t < span.end);
     if (spanRows.length) {
@@ -1428,27 +1570,30 @@
       // so it stays byte-identical to what was copied before.
       const title = span.title || "";
       const ceiling = maxChars > 0 ? maxChars : Infinity;
-      const groups = splitRowsIntoParts(spanRows, ceiling);
+      const groups = splitRowsIntoParts(spanRows, ceiling, txt);
       groups.forEach((g, gi) => {
         // Never joined from anything but whole segment texts: `body` is the
         // part's data and the only thing the losslessness check compares.
-        const body = g.map((r) => r.txt).join(" ");
+        const body = formatBody(g, txt);
         const partTitle =
           groups.length === 1
             ? title
             : title
               ? `${title} ${partMarker(`(part ${gi + 1}/${groups.length})`, title)}`
               : `Part ${gi + 1}/${groups.length}`;
+        // The video-title header (when the user asked for one) is a line of its
+        // own above the span's title, and every part carries it: a part is
+        // pasted on its own, so it has to say what it is on its own.
         chunks.push({
           title: partTitle,
           start: span.start,
           end: span.end,
           rowCount: g.length,
           body,
-          text: partTitle ? `${partTitle}\n${body}` : body,
+          text: [txt.header, partTitle, body].filter((s) => s !== "").join("\n"),
         });
       });
-      assertLosslessPartition(chunks, spanRows, ceiling);
+      assertLosslessPartition(chunks, spanRows, ceiling, txt);
     }
     return chunks.map((c, i) => ({ ...c, n: i + 1 }));
   }
@@ -1465,8 +1610,8 @@
   // A part is only ever closed BETWEEN segments, so a single segment longer
   // than the ceiling ends up alone in its own (necessarily oversized) part
   // rather than being cut in half. Every row is placed exactly once, in order.
-  function splitRowsIntoParts(rows, ceiling) {
-    const total = rowsLength(rows);
+  function splitRowsIntoParts(rows, ceiling, opts) {
+    const total = rowsLength(rows, opts);
     // Fits one write (or there is no ceiling): one part, byte-identical to the
     // text a single write has always received.
     if (!(total > ceiling)) return [rows];
@@ -1476,7 +1621,7 @@
     let curLen = 0;
     let remaining = total;
     for (const r of rows) {
-      const addLen = r.txt.length + 1;
+      const addLen = rowLength(r, opts);
       const target = Math.min(ceiling, Math.max(1, Math.ceil(remaining / Math.max(1, left))));
       if (cur.length && curLen + addLen > target) {
         groups.push(cur);
@@ -1493,13 +1638,15 @@
   }
 
   // How big a copy is, measured the way the batcher measures it: every row
-  // contributes its text plus the single space that follows it. So a part's
-  // body comes out strictly under its ceiling rather than exactly at it, and
-  // the callers that decide whether to batch measure their size with this same
-  // function, so the decision and the split can never disagree by a character.
-  function rowsLength(rows) {
+  // contributes the line it renders to plus the separator that follows it - its
+  // text and one space in the plain format, its `[0:00] `-prefixed line and one
+  // newline in the timestamped one. So a part's body comes out strictly under
+  // its ceiling rather than exactly at it, and the callers that decide whether
+  // to batch measure their size with this same function, so the decision and
+  // the split can never disagree by a character.
+  function rowsLength(rows, opts) {
     let n = 0;
-    for (const r of rows) n += r.txt.length + 1;
+    for (const r of rows) n += rowLength(r, opts);
     return n;
   }
 
@@ -1511,13 +1658,16 @@
   // does, failing loudly is the honest outcome: a copy that pasted a transcript
   // with a hole in it, or with a part repeated, would look exactly like a
   // successful copy.
-  function assertLosslessPartition(chunks, rows, ceiling) {
-    const source = rows.map((r) => r.txt).join(" ");
-    const reassembled = chunks.map((c) => c.body).join(" ");
+  function assertLosslessPartition(chunks, rows, ceiling, opts) {
+    const txt = textOptions(opts);
+    const source = formatBody(rows, txt);
+    const reassembled = chunks.map((c) => c.body).join(rowJoin(txt));
     const placed = chunks.reduce((n, c) => n + c.rowCount, 0);
     // A part may only exceed the ceiling when it holds one single segment that
     // is longer than the ceiling on its own: a caption is never cut in half.
     const overfull = chunks.find((c) => c.body.length > ceiling && c.rowCount > 1);
+    // (Measured on the part's body, which is exactly what the batcher sized: the
+    // title and header lines above it are not part of the partition.)
     if (reassembled !== source || placed !== rows.length || overfull) {
       throw new Error(
         "chunk partition would lose or duplicate transcript text " +
@@ -1526,6 +1676,336 @@
           "- refusing to copy"
       );
     }
+  }
+
+  // =========================================================
+  // TRANSCRIPT TEXT (rows -> the text that leaves the extension)
+  // =========================================================
+  // Everything a copy produces is built here, from the same row list every
+  // caption source returns: the plain single-paragraph copy, the line-by-line
+  // timestamped copy, and the optional video-title line. The batchers above
+  // call into this layer instead of joining row texts themselves, so "what does
+  // a copy look like" is answered in exactly one place.
+  //
+  // This block sits INSIDE the batcher region - from buildChunks down to the
+  // caption sources - deliberately: test/test_chunks.mjs extracts that whole
+  // slice and checks the partition against the text it reassembles, and the two
+  // have to travel together, since a slice without the formatter would compare
+  // text formatted one way against text formatted another.
+
+  // ---- the settings a copy reads (the bubble in the description writes them) ----
+  const TEXT_TITLE_KEY = "ytxt_title";
+  const TEXT_FORMAT_KEY = "ytxt_format";
+  const TEXT_TIME_KEY = "ytxt_time";
+  const TEXT_ACTION_KEY = "ytxt_action";
+  const FORMAT_PARAGRAPH = "paragraph";
+  const FORMAT_LINES = "lines";
+  // How a timestamp is written in the line-by-line format: the brackets, nothing
+  // at all, or parentheses. The digits themselves stay ASCII and unpadded (see
+  // clockText) whatever is chosen - this is the decoration around them, not a
+  // second timestamp format.
+  const TIME_BRACKET = "bracket";
+  const TIME_PLAIN = "plain";
+  const TIME_PAREN = "paren";
+  // What the main button's own click does, remembered from the caret menu: copy
+  // the transcript, or download it as .srt. A stored value the extension does not
+  // know falls back to copying, which is what the button has always done.
+  const ACTION_COPY = "copy";
+  const ACTION_SRT = "srt";
+
+  function readTextPref(key, fallback) {
+    try {
+      if (typeof localStorage !== "undefined") {
+        const v = localStorage.getItem(key);
+        if (v !== null && String(v).trim() !== "") return String(v).trim();
+      }
+    } catch (e) {}
+    return fallback;
+  }
+
+  // What a copy should look like right now: read per operation rather than
+  // cached, so flipping a switch in the bubble applies to the very next copy
+  // (the UI-language and caption-language preferences are read the same way).
+  // `header` is the video's title, and only when the user asked for one - the
+  // title is what makes the whole video's text self-describing, so it is
+  // resolved here instead of in each copy path.
+  function transcriptOptions() {
+    const format =
+      readTextPref(TEXT_FORMAT_KEY, FORMAT_PARAGRAPH) === FORMAT_LINES ? FORMAT_LINES : FORMAT_PARAGRAPH;
+    const header = readTextPref(TEXT_TITLE_KEY, "0") === "1" ? videoTitle() : "";
+    return { format, header, time: readTimeStyle() };
+  }
+
+  // The timestamp decoration, on its own so the copy paths, the bubble and the
+  // tests all read it the same way.
+  function readTimeStyle() {
+    const pref = readTextPref(TEXT_TIME_KEY, TIME_BRACKET);
+    return pref === TIME_PLAIN || pref === TIME_PAREN ? pref : TIME_BRACKET;
+  }
+
+  // Which operation the main button's own click runs, remembered across copies
+  // and across visits: chosen in the caret menu, applied by the button.
+  function transcriptAction() {
+    return readTextPref(TEXT_ACTION_KEY, ACTION_COPY) === ACTION_SRT ? ACTION_SRT : ACTION_COPY;
+  }
+
+  function saveTranscriptOption(key, value) {
+    try {
+      if (typeof localStorage !== "undefined") localStorage.setItem(key, String(value));
+    } catch (e) {}
+  }
+
+  // Normalizes whatever a caller passed into a full options object, so the
+  // batchers can be called with nothing at all (the plain format, which is what
+  // they have always produced) or with the user's choice, and everything
+  // downstream can read both fields without testing them again.
+  function textOptions(opts) {
+    if (!opts) return { format: FORMAT_PARAGRAPH, header: "", time: TIME_BRACKET };
+    return {
+      format: opts.format === FORMAT_LINES ? FORMAT_LINES : FORMAT_PARAGRAPH,
+      header: typeof opts.header === "string" ? opts.header : "",
+      time: opts.time === TIME_PLAIN || opts.time === TIME_PAREN ? opts.time : TIME_BRACKET,
+    };
+  }
+
+  // ---- how a timestamp is written in the copied text ----
+  // `0:05`, and `1:02:03` once the video passes an hour: the same shape the
+  // page's own transcript panel shows, and the same shape parseTimecode() reads
+  // back, so a copied line can be turned into a seek time again. The digits stay
+  // ASCII and no bidi control character is added - this is content, and it has
+  // to survive being pasted into notes and grepped. In an RTL paragraph the
+  // line's own bidi algorithm puts the bracketed timestamp where it belongs, the
+  // same way it does for the panel's own rows.
+  function clockText(sec) {
+    const total = Math.max(0, Math.floor(Number(sec) || 0));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    const pad = (n) => String(n).padStart(2, "0");
+    return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+  }
+
+  // The timestamp as the chosen style writes it, decoration included. Written
+  // around clockText() rather than into it, so how a time is SPELLED stays in
+  // one place and the three styles stay three decorations.
+  function timeText(sec, opts) {
+    const time = clockText(sec);
+    const style = textOptions(opts).time;
+    if (style === TIME_PLAIN) return time;
+    if (style === TIME_PAREN) return `(${time})`;
+    return `[${time}]`;
+  }
+
+  // One row as one line of the chosen format. The separator belongs to the
+  // format, not to the row: the plain format joins rows with a space (the form
+  // the extension has always copied), the timestamped one joins them with a
+  // newline and prefixes each with its own timestamp.
+  function renderRow(row, opts) {
+    return textOptions(opts).format === FORMAT_LINES ? `${timeText(row.t, opts)} ${row.txt}` : row.txt;
+  }
+
+  function rowJoin(opts) {
+    return textOptions(opts).format === FORMAT_LINES ? "\n" : " ";
+  }
+
+  function formatBody(rows, opts) {
+    const txt = textOptions(opts);
+    return rows.map((r) => renderRow(r, txt)).join(rowJoin(txt));
+  }
+
+  // The size one row contributes, separator included (see rowsLength).
+  function rowLength(row, opts) {
+    return renderRow(row, opts).length + 1;
+  }
+
+  // =========================================================
+  // SRT EXPORT (rows -> SubRip, one cue per segment)
+  // =========================================================
+  // The same rows, in the other file format. A SubRip file is a list of cues,
+  // so the rows are turned into cues FIRST and everything else is built from
+  // those: numbering, the part split and the losslessness check all work on
+  // cues, never on text that has been joined and would have to be cut apart
+  // again. A cue is never split in half, exactly like a copied segment.
+  //
+  // Cue text is the segment text as-is: no bidi control characters are added,
+  // and only the timestamp line carries ASCII digits in SubRip's own notation.
+  // Players resolve the direction of each cue's text themselves, so an Arabic
+  // or Hebrew transcript exports as clean, unmarked UTF-8.
+
+  // How long the LAST cue of a span may run when nothing else bounds it. Every
+  // other cue ends where the next one starts - that is what the panel's own
+  // timings mean - but the last has no successor, and a cue with no duration is
+  // dropped by most players.
+  const SRT_LAST_CUE_SECONDS = 4;
+
+  // `00:00:05,000`: the one place milliseconds and a comma are required, so
+  // this is not clockText() with a different separator.
+  function srtTime(sec) {
+    const ms = Math.max(0, Math.round((Number(sec) || 0) * 1000));
+    const pad = (n, w) => String(n).padStart(w, "0");
+    return (
+      `${pad(Math.floor(ms / 3600000), 2)}:` +
+      `${pad(Math.floor((ms % 3600000) / 60000), 2)}:` +
+      `${pad(Math.floor((ms % 60000) / 1000), 2)},` +
+      `${pad(ms % 1000, 3)}`
+    );
+  }
+
+  // One span's rows -> its cues, in order. A cue ends where the next cue starts,
+  // and the last one stops at the span's own end when it has one: a chapter's
+  // subtitles therefore stop at the chapter boundary instead of running on into
+  // the next chapter, while a whole-video export gives its last cue a sane
+  // length rather than zero.
+  function buildSrtCues(rows, span) {
+    const sorted = [...rows].sort((a, b) => a.t - b.t);
+    const bounded = span && Number.isFinite(span.end) ? span.end : Infinity;
+    return sorted.map((row, i) => {
+      const next = sorted[i + 1];
+      let end = next ? next.t : bounded === Infinity ? row.t + SRT_LAST_CUE_SECONDS : bounded;
+      end = Math.min(end, bounded);
+      // A zero-length cue is invisible, so one is never emitted. This can only
+      // be reached by the last row of a span whose end coincides with it.
+      if (!(end > row.t)) end = row.t + 2;
+      return { start: row.t, end, text: row.txt };
+    });
+  }
+
+  // The cues -> a file body. Blocks are separated by a blank line and numbered
+  // from 1 within THIS file (every part of a split download is a file of its
+  // own), and the text ends with the blank line SubRip parsers expect. The line
+  // ending is a bare LF, like every other string this extension produces, which
+  // the players and editors that read .srt accept.
+  function srtText(cues) {
+    return cues.map((c, i) => `${i + 1}\n${srtTime(c.start)} --> ${srtTime(c.end)}\n${c.text}\n\n`).join("");
+  }
+
+  function srtWords(text) {
+    return String(text || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean).length;
+  }
+
+  // Divides one span's cues into the parts a download is made of, on the SRT
+  // batcher's own numbers (SRT_CHUNK_MAX_WORDS). The algorithm is the row
+  // splitter's, word by word instead of character by character: the part count
+  // comes from the data (`ceil(words / ceiling)`) and each part's target is the
+  // text still unplaced shared over the parts still to come, so a part that came
+  // in under its target raises the next one's instead of leaving a stub at the
+  // end. A part is only ever closed BETWEEN cues, so a single cue longer than
+  // the ceiling ends up alone in its own part.
+  function splitCuesIntoParts(cues, maxWords) {
+    const weights = cues.map((c) => srtWords(c.text));
+    const total = weights.reduce((n, w) => n + w, 0);
+    // Fits one file (or there is no ceiling): one part, the whole span.
+    if (!(total > maxWords)) return [cues];
+    let left = Math.ceil(total / maxWords);
+    const groups = [];
+    let cur = [];
+    let curLen = 0;
+    let remaining = total;
+    for (let i = 0; i < cues.length; i++) {
+      const add = weights[i];
+      const target = Math.min(maxWords, Math.max(1, Math.ceil(remaining / Math.max(1, left))));
+      if (cur.length && curLen + add > target) {
+        groups.push(cur);
+        remaining -= curLen;
+        left--;
+        cur = [];
+        curLen = 0;
+      }
+      cur.push(cues[i]);
+      curLen += add;
+    }
+    if (cur.length) groups.push(cur);
+    return groups;
+  }
+
+  // Refuses a partition that is not lossless - the same guarantee the copied
+  // parts get: every cue lands in exactly one part, in order, so the part files
+  // reassemble into the whole transcript with nothing dropped or duplicated. A
+  // part may only exceed the ceiling when it holds a single cue that is longer
+  // than the ceiling on its own.
+  function assertLosslessSrt(parts, cues, maxWords) {
+    const placed = parts.reduce((n, p) => n + p.cueCount, 0);
+    const reassembled = parts.map((p) => p.cues).flat();
+    const same = reassembled.length === cues.length && reassembled.every((c, i) => c === cues[i]);
+    const overfull = parts.find((p) => p.words > maxWords && p.cueCount > 1);
+    if (!same || placed !== cues.length || overfull) {
+      throw new Error(
+        "SRT partition would lose or duplicate cues " +
+          `(cues ${placed}/${cues.length}, ` +
+          `overfull=${overfull ? overfull.words + ">" + maxWords : "no"}) ` +
+          "- refusing to export"
+      );
+    }
+  }
+
+  // The SRT batcher's unit of work for ONE node: the whole video (an untitled
+  // span whose end is Infinity) or one chapter - the same spans the copy
+  // batcher takes, so a chapter's subtitles cover exactly the chapter's copy.
+  // Every returned part is already a complete .srt file of its own.
+  function buildSrtParts(span, rows, maxWords) {
+    const cues = buildSrtCues(rows, span);
+    if (!cues.length) return [];
+    const groups = splitCuesIntoParts(cues, maxWords);
+    const parts = groups.map((g, i) => {
+      // `body` is what the session measures for its progress and `text` is what
+      // is written out; a part is one complete .srt file, so they are the same
+      // string (unlike a copied part, whose text carries a title line above the
+      // body a progress count would then include).
+      const file = srtText(g);
+      return {
+        title: span.title || "",
+        n: i + 1,
+        total: groups.length,
+        start: g[0].start,
+        end: g[g.length - 1].end,
+        cueCount: g.length,
+        words: g.reduce((n, c) => n + srtWords(c.text), 0),
+        cues: g,
+        body: file,
+        text: file,
+      };
+    });
+    assertLosslessSrt(parts, cues, maxWords);
+    return parts;
+  }
+
+  // A name a file system will actually accept, from the video's title. Only a
+  // downloaded file gets a title at all: a copied SRT text has no name to embed
+  // it in, which is why the optional title line is a copy-only setting.
+  function srtFilename(title, part) {
+    let base = cleanSegmentText(title).replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ");
+    base = base.replace(/\s+/g, " ").replace(/^[. ]+|[. ]+$/g, "").slice(0, 80).trim();
+    if (!base) base = "transcript";
+    const label = part && part.total > 1 ? `${base} - part ${part.n} of ${part.total}` : base;
+    return `${label}.srt`;
+  }
+
+  // Writes one file out of the page. A content script cannot use the downloads
+  // API without asking for a permission, but an object URL plus an <a download>
+  // is the same mechanism the page itself uses for a downloaded blob, needs no
+  // permission, and keeps the file identical to what a clipboard copy would
+  // have held.
+  function downloadSrtFileText(name, text) {
+    const blob = new Blob([text], { type: "application/x-subrip;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoking immediately can race the browser's own read of the blob, so the
+    // URL is released on a timer instead (the page keeps working either way -
+    // the browser has already taken its copy of the file).
+    setTimeout(() => {
+      try {
+        URL.revokeObjectURL(url);
+      } catch (e) {}
+    }, 60000);
   }
 
   // =========================================================
@@ -2130,16 +2610,54 @@
     const row = btn.parentElement;
     if (!row || typeof row.matches !== "function" || !row.matches(CHAPTER_ITEM_SELECTOR)) return;
     if (!row.classList || !row.style || typeof row.style.setProperty !== "function") return;
-    let width = 0;
+    const widthOf = (el) => {
+      try {
+        const rect = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        return rect && rect.width ? Math.ceil(rect.width) : 0;
+      } catch (e) {
+        return 0;
+      }
+    };
+    // Measure EVERY badge the row carries, not just the one showing the count:
+    // a chapter row holds the transcript badge and, beside it, the SRT badge
+    // (see makeChapterSrtButton). The room the row has to keep clear of the
+    // title is therefore the whole strip - both widths, the 6px inset from the
+    // row's inline edge, the 6px between the two - plus the same small air a
+    // single badge used to leave.
+    let badges = [btn];
     try {
-      const rect = btn.getBoundingClientRect ? btn.getBoundingClientRect() : null;
-      width = rect && rect.width ? Math.ceil(rect.width) : 0;
+      const found = row.querySelectorAll(`.${CHAPTER_BTN_CLS}, .${CHAPTER_SRT_BTN_CLS}`);
+      if (found.length) badges = [...found];
     } catch (e) {}
+    let width = 0;
+    badges.forEach((b, i) => {
+      width += widthOf(b) + (i ? BADGE_EDGE_GAP : 0);
+    });
     // Nothing measured means nothing to go on: leave the row exactly as it was
     // rather than reserve a number that is not the badge's real width.
     if (!width) return;
+    // The SRT badge sits further in than the transcript badge, so a transcript
+    // badge grown into a pill would run underneath it: the SRT badge is pushed
+    // out by exactly the width the pill has taken, and drops back to its
+    // content.css position (6 + 22 + 6, i.e. a circle and the two gaps) once the
+    // pill is gone.
+    try {
+      const srtBadge = row.querySelector(`.${CHAPTER_SRT_BTN_CLS}`);
+      const copyBadge = row.querySelector(`.${CHAPTER_BTN_CLS}`);
+      const pillShown = copyBadge && copyBadge.classList && copyBadge.classList.contains(CHUNK_LABEL_CLS);
+      if (srtBadge && srtBadge.style && typeof srtBadge.style.setProperty === "function") {
+        if (pillShown) {
+          srtBadge.style.setProperty(
+            "inset-inline-end",
+            BADGE_EDGE_GAP + widthOf(copyBadge) + BADGE_EDGE_GAP + "px"
+          );
+        } else {
+          srtBadge.style.removeProperty("inset-inline-end");
+        }
+      }
+    } catch (e) {}
     row.classList.add(BADGE_PILL_CLS);
-    row.style.setProperty(BADGE_ROOM_VAR, width + BADGE_ROOM_GAP + "px");
+    row.style.setProperty(BADGE_ROOM_VAR, width + BADGE_EDGE_GAP + BADGE_AIR_GAP + "px");
   }
 
   // The main Transcript button's single unit of work: the whole video, with no
@@ -2164,19 +2682,46 @@
   // Returns "whole" when the payload was written in one go, or "parts" when a
   // chunk session was started (the caller must then leave the button alone -
   // copyNextChunk has already set it up). `maxChars` is the caller's own cap,
-  // so a recovery re-split still follows the caller's numbers.
-  async function copyRowsWithSplitFallback(rows, span, text, btn, maxChars) {
+  // so a recovery re-split still follows the caller's numbers, and `opts` is the
+  // caller's text format, for the same reason.
+  async function copyRowsWithSplitFallback(rows, span, text, btn, maxChars, opts) {
     try {
       await copyTextToClipboard(text);
       return "whole";
     } catch (err) {
-      const chunks = span ? buildChunks(span, rows, maxChars) : [];
+      const chunks = span ? buildChunks(span, rows, maxChars, opts) : [];
       if (chunks.length < 2) throw err;
       console.warn(
         `[YT-Transcript] one clipboard write was rejected; copying as ${chunks.length} parts instead:`,
         err && err.message
       );
-      chunkSession = { chunks, idx: 0, owner: btn };
+      chunkSession = { chunks, idx: 0, owner: btn, write: "clipboard", mode: "copy" };
+      try {
+        await copyNextChunk(btn);
+      } catch (err2) {
+        chunkSession = null;
+        throw err2;
+      }
+      return "parts";
+    }
+  }
+
+  // The SRT counterpart of the fallback above, for the one SRT output that goes
+  // to the CLIPBOARD: a chapter's subtitles (the main button saves a file
+  // instead). One write when the file text fits, and the same ordered part
+  // sequence a huge copy degrades into when it does not - the badge then counts
+  // the parts it has put on the clipboard, exactly like the transcript badge.
+  async function copySrtWithSplitFallback(parts, btn) {
+    try {
+      await copyTextToClipboard(parts[0].text);
+      return "whole";
+    } catch (err) {
+      if (parts.length < 2) throw err;
+      console.warn(
+        `[YT-Transcript] one SRT write was rejected; copying as ${parts.length} parts instead:`,
+        err && err.message
+      );
+      chunkSession = { chunks: parts, idx: 0, owner: btn, write: "clipboard", mode: "srt" };
       try {
         await copyNextChunk(btn);
       } catch (err2) {
@@ -2201,15 +2746,44 @@
   // matched to the chapter list), where there is no title to split by: it
   // becomes an untitled span of its own and the rows are written as-is, exactly
   // as before.
-  async function copyChapterRows(rows, chapter, btn) {
+  async function copyChapterRows(rows, chapter, btn, mode) {
     if (!rows.length) return false;
+    const isSrt = mode === "srt";
     const span = chapter || wholeVideoSpan();
-    const chunks = buildChunks(span, rows, CHAPTER_CHUNK_MAX_CHARS);
+    // The two outputs of one chapter are two different batchers over the SAME
+    // rows: the transcript goes to the clipboard on the CHAPTER_* numbers, the
+    // subtitles on the SRT ones (words), so retuning either leaves the other
+    // exactly as it was.
+    if (isSrt) {
+      const parts = buildSrtParts(span, rows, SRT_CHUNK_MAX_WORDS);
+      if (!parts.length || !parts[0].text) return false;
+      const words = parts.reduce((n, p) => n + p.words, 0);
+      if (words > SRT_CHUNK_THRESHOLD_WORDS && parts.length > 1) {
+        chunkSession = { chunks: parts, idx: 0, owner: btn, write: "clipboard", mode: "srt" };
+        try {
+          await copyNextChunk(btn);
+        } catch (err) {
+          chunkSession = null;
+          throw err;
+        }
+        return true;
+      }
+      const srtOutcome = await copySrtWithSplitFallback(parts, btn);
+      if (srtOutcome === "whole") {
+        lastStats.rows = parts[0].cueCount || rows.length;
+        logStats();
+        setButtonState(btn, t("badge.copied"), false);
+        setTimeout(() => resetMainButton(btn), 1500);
+      }
+      return true;
+    }
+    const opts = transcriptOptions();
+    const chunks = buildChunks(span, rows, CHAPTER_CHUNK_MAX_CHARS, opts);
     if (!chunks.length || !chunks[0].text) return false;
     // A chapter batches itself: it is only cut into parts when the chapter alone
     // is bigger than its own ceiling and yields more than one part.
-    if (rowsLength(rows) > CHAPTER_CHUNK_THRESHOLD && chunks.length > 1) {
-      chunkSession = { chunks, idx: 0, owner: btn };
+    if (rowsLength(rows, opts) > CHAPTER_CHUNK_THRESHOLD && chunks.length > 1) {
+      chunkSession = { chunks, idx: 0, owner: btn, write: "clipboard", mode: "copy" };
       try {
         await copyNextChunk(btn);
       } catch (err) {
@@ -2223,7 +2797,14 @@
     }
     // Fits in one write - but if that write is rejected for size, fall back to
     // parts rather than failing (see copyRowsWithSplitFallback).
-    const outcome = await copyRowsWithSplitFallback(rows, span, chunks[0].text, btn, CHAPTER_CHUNK_MAX_CHARS);
+    const outcome = await copyRowsWithSplitFallback(
+      rows,
+      span,
+      chunks[0].text,
+      btn,
+      CHAPTER_CHUNK_MAX_CHARS,
+      opts
+    );
     if (outcome === "whole") {
       lastStats.rows = chunks[0].rowCount || rows.length;
       logStats();
@@ -2236,8 +2817,41 @@
     return true;
   }
 
-  async function copyChapterRange(chapter, btn) {
+  // The main button's SRT download: the whole video's rows, split on the SRT
+  // batcher's own numbers, saved as one .srt file - or, past the threshold, as
+  // an ordered series of part files the user asks for one click at a time. The
+  // click-at-a-time flow is deliberately the same as the chunked copy: a browser
+  // blocks (or prompts on) a burst of downloads from one gesture, and an
+  // explicit click per part is also what lets the button say how much has been
+  // saved so far. The video's title is carried by the file NAMES, which is the
+  // only place a .srt can hold it - subtitles have no comment line.
+  async function exportSrtRows(rows, btn) {
+    const parts = buildSrtParts(wholeVideoSpan(), rows, SRT_CHUNK_MAX_WORDS);
+    if (!parts.length) return false;
+    const title = videoTitle();
+    lastStats.out = "srt";
+    const words = parts.reduce((n, p) => n + p.words, 0);
+    if (words > SRT_CHUNK_THRESHOLD_WORDS && parts.length > 1) {
+      chunkSession = { chunks: parts, idx: 0, owner: btn, write: "file", mode: "srt", title };
+      await copyNextChunk(btn);
+      return true;
+    }
+    downloadSrtFileText(srtFilename(title, parts[0]), parts[0].text);
+    lastStats.rows = parts[0].cueCount || rows.length;
+    logStats();
+    setButtonState(btn, t("srt.downloaded"), false);
+    setTimeout(() => resetMainButton(btn), 1500);
+    return true;
+  }
+
+  // Copies one chapter's slice, as transcript text or as SRT text - the two
+  // chapter badges differ in nothing but this flag, so both walk the same
+  // caption chain (timedtext → get_panel → get_transcript, panel scrape last)
+  // and cut the same rows out of it. A mode the SRT badge can reach but not
+  // copy (a download) does not exist: only the main button writes files.
+  async function copyChapterRange(chapter, btn, mode) {
     const original = btn.getAttribute("data-orig") || "📋";
+    const isSrt = mode === "srt";
 
     // A chunk session started by THIS button: each click copies the next part of
     // an oversized chapter. A session owned by another button is left alone -
@@ -2264,7 +2878,14 @@
     const toSec = chapter ? chapter.end : Infinity;
     // The raw title (not the bidi-isolated one) - this label also lands in the
     // debug report, which has to stay byte-identical for tooling.
-    resetStats(chapter && chapter.title ? t("label.chapter", { title: chapter.title }) : t("label.chapterGeneric"));
+    // The raw title (not the bidi-isolated one) - this label also lands in the
+    // debug report, which has to stay byte-identical for tooling.
+    resetStats(
+      chapter && chapter.title
+        ? t(isSrt ? "srt.labelChapter" : "label.chapter", { title: chapter.title })
+        : t(isSrt ? "srt.labelChapterGeneric" : "label.chapterGeneric")
+    );
+    lastStats.out = isSrt ? "srt" : "copy";
     const epoch = navEpoch;
     try {
       setButtonState(btn, t("badge.copying"), true);
@@ -2287,7 +2908,7 @@
         if (capRows.length) {
           lastStats.source = "captions";
           lastStats.rows = capRows.length;
-          if (await copyChapterRows(capRows, chapter, btn)) return;
+          if (await copyChapterRows(capRows, chapter, btn, mode)) return;
         }
       }
 
@@ -2333,7 +2954,7 @@
       }
       if (!rows.length) throw new Error(t("error.noRange"));
 
-      await copyChapterRows(rows, chapter, btn);
+      await copyChapterRows(rows, chapter, btn, mode);
     } catch (err) {
       if (abandoned(epoch)) {
         setButtonState(btn, original, false);
@@ -2348,7 +2969,7 @@
           if (fallbackRows.length) {
             lastStats.source = "captions";
             lastStats.rows = fallbackRows.length;
-            if (await copyChapterRows(fallbackRows, chapter, btn)) return;
+            if (await copyChapterRows(fallbackRows, chapter, btn, mode)) return;
           }
         }
       } catch (e2) {
@@ -2386,8 +3007,33 @@
         if (row.style && typeof row.style.removeProperty === "function") {
           row.style.removeProperty(BADGE_ROOM_VAR);
         }
+        // The row may carry a second badge - the SRT one - that is still mid-
+        // session, or was pushed aside by this badge's pill. Either way the
+        // strip is re-measured from what is actually left on the row: a sibling
+        // pill takes the room over, and with no pill left the SRT badge drops
+        // back to the offset content.css gives it (a circle and two gaps from
+        // the row's end), so it cannot keep a stale gap from a pill that is
+        // already gone.
+        try {
+          const other = row.querySelector(
+            `.${CHAPTER_BTN_CLS}.${CHUNK_LABEL_CLS}, .${CHAPTER_SRT_BTN_CLS}.${CHUNK_LABEL_CLS}`
+          );
+          if (other) {
+            reserveBadgeRoom(other);
+          } else {
+            const srtBadge = row.querySelector(`.${CHAPTER_SRT_BTN_CLS}`);
+            if (srtBadge && srtBadge.style && typeof srtBadge.style.removeProperty === "function") {
+              srtBadge.style.removeProperty("inset-inline-end");
+            }
+          }
+        } catch (e) {}
       }
-      btn.textContent = btn.getAttribute("data-orig") || t("button.idle");
+      // The main button has no `data-orig` glyph (that is what marks a compact
+      // badge), so its idle label is decided by the operation it is set to run:
+      // a remembered .srt download has to keep saying so when the flash ends.
+      btn.textContent =
+        btn.getAttribute("data-orig") ||
+        t(btn.getAttribute("data-mode") === ACTION_SRT ? "button.idleSrt" : "button.idle");
       btn.disabled = false;
       // Restore the button's own tooltip: a chunk session overwrote it with the
       // "click again for the next part" instruction, and the chapter badges carry
@@ -2415,10 +3061,34 @@
 
   // Copies the next chunk of an active chunk session. The button becomes a
   // "copy next chunk" control until every chunk is copied.
+  // The wording of the three session states, per output and per button shape.
+  // The copy sessions paste a part; the SRT sessions either paste subtitle text
+  // (a chapter badge) or save a part file (the main button's download), and a
+  // saved part is not "copied" - hence a table instead of one label built with
+  // a ternary, which is also what keeps the keys of both outputs side by side.
+  const SESSION_LABELS = {
+    copy: {
+      copying: ["button.chunkCopying", "badge.chunkCopying"],
+      next: ["button.chunkNext", "badge.chunkNext"],
+      done: ["button.chunkAll", "badge.copied"],
+    },
+    srt: {
+      copying: ["srt.buttonCopying", "srt.badgeCopying"],
+      next: ["srt.buttonNext", "srt.badgeNext"],
+      done: ["srt.buttonDone", "badge.copied"],
+    },
+  };
+
   async function copyNextChunk(btn) {
     const session = chunkSession;
     const n = session.chunks.length;
     const ch = session.chunks[session.idx];
+    // Which batcher this session belongs to. Everything shared - the counts,
+    // the progress and the session bookkeeping - is shared precisely because all
+    // of them are the same sequence of ordered parts; only the write target and
+    // the wording differ.
+    const isSrt = session.mode === "srt";
+    const toFile = session.write === "file";
 
     // Carry the caption-source provenance (which fallback produced the rows)
     // into the per-chunk report instead of wiping it on each chunk reset.
@@ -2431,36 +3101,45 @@
     };
     // The diagnostic label stays ASCII on purpose: it lands in the debug report
     // and `data-debug`, which have to be comparable between users and grep-able.
-    resetStats(`Chunk ${ch.n}/${n}`);
+    // (Only the `label.*` wording is translated; the field names never are.)
+    resetStats(
+      isSrt ? t("srt.labelChunk", { n: ch.n, total: n }) : `Chunk ${ch.n}/${n}`
+    );
     Object.assign(lastStats, provenance);
     lastStats.source = "chunks";
-    lastStats.rows = ch.rowCount || 0;
+    lastStats.out = isSrt ? "srt" : "copy";
+    lastStats.rows = ch.rowCount || ch.cueCount || 0;
     // The chapter and player buttons are 22px squares, so they get the count
     // without any words; the main button has room for the full label. The
     // explanation is carried by the tooltip either way.
     const compact = !!btn.getAttribute("data-orig");
+    const label = (state, vars) =>
+      t(SESSION_LABELS[isSrt ? "srt" : "copy"][state][compact ? 1 : 0], vars);
     // The counter is PROGRESS, not the next part's number: it counts the parts
-    // already on the clipboard. `session.idx` is exactly that count, so this
-    // first write shows 0/N (nothing copied yet) and the label after it moves
-    // to 1/N, 2/N, ... - it no longer names the part this very click is about
-    // to copy, which read as though a part had been counted before the user's
+    // already handed over. `session.idx` is exactly that count, so this first
+    // write shows 0/N (nothing copied yet) and the label after it moves to
+    // 1/N, 2/N, ... - it no longer names the part this very click is about to
+    // copy, which read as though a part had been counted before the user's
     // first paste.
-    setChunkLabel(
-      btn,
-      t(compact ? "badge.chunkCopying" : "button.chunkCopying", { count: countText(session.idx, n) }),
-      true
-    );
-    await copyTextToClipboard(ch.text);
+    setChunkLabel(btn, label("copying", { count: countText(session.idx, n) }), true);
+    if (toFile) {
+      // One file per part, named from the video's title with the part number in
+      // the name (a .srt cannot carry a title line of its own).
+      downloadSrtFileText(srtFilename(session.title || videoTitle(), ch), ch.text);
+    } else {
+      await copyTextToClipboard(ch.text);
+    }
     session.idx++;
     // Read after the write and before the report: the share shown is the one
-    // that is actually on the clipboard, with nothing in flight counted.
+    // that is actually on the clipboard (or on disk), with nothing in flight
+    // counted.
     const copied = sessionProgress(session, session.idx);
     lastStats.progress = copied.pct;
     logStats();
 
     if (session.idx >= n) {
       // Single glyph: the circular badge fits it, so no count class here.
-      setButtonState(btn, compact ? t("badge.copied") : t("button.chunkAll"), false);
+      setButtonState(btn, label("done"));
       setTimeout(() => {
         chunkSession = null;
         resetMainButton(btn);
@@ -2474,13 +3153,27 @@
       // pill, and a percentage as well would be wide enough to sit over the
       // chapter title it belongs to. So the count stays bare there and the share
       // is carried by the tooltip (and by the report) instead.
-      t(compact ? "badge.chunkNext" : "button.chunkNext", {
+      label("next", {
         // The same progress count: every part copied, this one included.
         count: countText(session.idx, n),
         pct: percentText(copied.pct),
       }),
       false
     );
+    if (isSrt) {
+      btn.title =
+        t("srt.chunkInstruction", {
+          n: countText(ch.n),
+          total: countText(n),
+          // A downloaded part has no chapter title to name it by (the main
+          // button's span is untitled), so the video's title stands in.
+          title: isolateRtl(ch.title || session.title || videoTitle()),
+          next: countText(next.n),
+        }) +
+        " " +
+        t("srt.progress", { pct: percentText(copied.pct) });
+      return;
+    }
     btn.title =
       t("chunk.instruction", {
         n: countText(ch.n),
@@ -2492,15 +3185,22 @@
       t("chunk.progress", { pct: percentText(copied.pct) });
   }
 
-  async function handleClick() {
+  // The main button's whole-video operation, in either of the two outputs the
+  // caret menu offers: `mode` is "copy" (the transcript to the clipboard, the
+  // default and the button's own click) or "srt" (the subtitles saved as a .srt
+  // file). Both walk the SAME caption chain and build from the SAME rows - the
+  // mode only decides what is made of them at the end - so a new caption source
+  // or a fix to the panel scrape lands in both at once.
+  async function handleClick(mode) {
     const btn = document.getElementById(BUTTON_ID);
     if (!btn) return;
     const epoch = navEpoch;
+    const isSrt = mode === "srt";
 
-    // An active chunk session: each click copies the next chunk. Only the button
-    // that started the session continues it, so clicking the Transcript button
-    // while a chapter is mid-sequence starts a fresh full copy instead of
-    // resuming the chapter's chunk list.
+    // An active chunk session: each click copies (or saves) the next chunk. Only
+    // the button that started the session continues it, so clicking the
+    // Transcript button while a chapter is mid-sequence starts a fresh full copy
+    // instead of resuming the chapter's chunk list.
     // (While the final "all copied" flash is showing, ignore extra clicks.)
     if (chunkSession && chunkSession.owner === btn) {
       if (chunkSession.idx < chunkSession.chunks.length) {
@@ -2522,8 +3222,9 @@
     chunkSession = null;
 
     try {
-      setButtonState(btn, t("button.copying"), true);
-      resetStats(t("label.full"));
+      setButtonState(btn, t(isSrt ? "srt.downloading" : "button.copying"), true);
+      resetStats(t(isSrt ? "srt.labelFull" : "label.full"));
+      lastStats.out = isSrt ? "srt" : "copy";
 
       // Fast path: the exact caption fetch (timedtext → get_panel →
       // get_transcript) returns the whole transcript in one or two requests
@@ -2566,7 +3267,13 @@
       if (!rows.length) throw new Error(t("error.noText"));
       rows.sort((a, b) => a.t - b.t);
       lastStats.rows = rows.length;
-      const fullText = rows.map((r) => r.txt).join(" ");
+
+      // The SRT output stops here: same rows, but the rest of this function is
+      // about writing text to the clipboard, and a download never writes to it.
+      if (isSrt) {
+        await exportSrtRows(rows, btn);
+        return;
+      }
 
       // Keep normal videos as a single copy, but split exceptionally large
       // transcripts into ordered, bounded parts so very long videos remain
@@ -2578,16 +3285,31 @@
       // cut into one piece per chapter and labelled with chapter titles.
       // Chapters are other nodes with their own buttons and their own numbers.
       const span = wholeVideoSpan();
-      if (rowsLength(rows) > MAIN_CHUNK_THRESHOLD) {
-        const chunks = buildChunks(span, rows, MAIN_CHUNK_MAX_CHARS);
+      // The text the user asked for: the paragraph form by default, or one line
+      // per segment with its timestamp, plus the video's title line when the
+      // settings bubble has it switched on.
+      const opts = transcriptOptions();
+      if (rowsLength(rows, opts) > MAIN_CHUNK_THRESHOLD) {
+        const chunks = buildChunks(span, rows, MAIN_CHUNK_MAX_CHARS, opts);
         if (chunks.length >= 2) {
-          chunkSession = { chunks, idx: 0, owner: btn };
+          chunkSession = { chunks, idx: 0, owner: btn, write: "clipboard", mode: "copy" };
           await copyNextChunk(btn);
           return;
         }
       }
 
-      const outcome = await copyRowsWithSplitFallback(rows, span, fullText, btn, MAIN_CHUNK_MAX_CHARS);
+      // A single write gets the same text the batcher would have produced for
+      // one part - built by the same function, so the format can never differ
+      // between a short transcript and a long one.
+      const fullText = buildChunks(span, rows, MAIN_CHUNK_MAX_CHARS, opts)[0].text;
+      const outcome = await copyRowsWithSplitFallback(
+        rows,
+        span,
+        fullText,
+        btn,
+        MAIN_CHUNK_MAX_CHARS,
+        opts
+      );
       if (outcome === "whole") {
         logStats();
         btn.textContent = t("button.copied");
@@ -2606,7 +3328,18 @@
         const retryCaps = await fetchCaptionsFallback();
         if (abandoned(epoch)) return;
         if (retryCaps) {
-          const retryText = retryCaps.map((r) => r.txt).join(" ");
+          // An SRT download retries through the same chain: the retry re-runs
+          // the export on the rows that just arrived instead of the clipboard
+          // path below (exportSrtRows reports its own stats).
+          if (isSrt) {
+            // The retry's rows came from the captions, whatever the download
+            // then does with them - the export reports its own write.
+            lastStats.source = "captions";
+            lastStats.rows = retryCaps.length;
+            if (await exportSrtRows(retryCaps, btn)) return;
+          }
+          const opts = transcriptOptions();
+          const retryText = buildChunks(wholeVideoSpan(), retryCaps, MAIN_CHUNK_MAX_CHARS, opts)[0].text;
           if (retryText) {
             // Same rule as the first attempt: a rejected single write degrades
             // into parts instead of failing twice - through the main button's
@@ -2616,7 +3349,8 @@
               wholeVideoSpan(),
               retryText,
               btn,
-              MAIN_CHUNK_MAX_CHARS
+              MAIN_CHUNK_MAX_CHARS,
+              opts
             );
             if (retryOutcome === "whole") {
               lastStats.source = "captions";
@@ -2687,27 +3421,46 @@
     return null;
   }
 
-  function makeChapterButton(item, chapter) {
+  // Builds one of the two badges a chapter row carries: the transcript badge
+  // (📋 - the chapter as text) and the SRT badge (⏱ - the same chapter as
+  // subtitles). They are one control in every other respect: same size, same
+  // tooltip shape, same click handling, and a chapter too big for one clipboard
+  // write turns either of them into the "n/N" control of its own sequence. So
+  // they differ only in their class, their glyph and what the click does.
+  //
+  // Only the transcript badge is offered as a download anywhere: a chapter's SRT
+  // goes to the clipboard, and the main button's caret menu is what writes files.
+  function makeChapterBadge(cls, glyph, tip, onClick) {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = CHAPTER_BTN_CLS;
-    btn.title = chapter
-      ? t("chapter.tip", { title: isolateRtl(chapter.title) })
-      : t("chapter.noTitleTip");
-    btn.textContent = "📋";
-    btn.setAttribute("data-orig", "📋");
+    btn.className = cls;
+    btn.title = tip;
+    btn.textContent = glyph;
+    btn.setAttribute("data-orig", glyph);
     // The tooltip a chunk session has to restore when it ends (it replaces the
     // title with the "click again" instruction while a sequence is running).
-    btn.setAttribute("data-tip", btn.title);
-    btn.setAttribute("aria-label", btn.title);
+    btn.setAttribute("data-tip", tip);
+    btn.setAttribute("aria-label", tip);
     btn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      copyChapterRange(chapter, btn);
+      onClick(btn);
     });
     btn.addEventListener("pointerdown", (e) => e.stopPropagation());
     btn.addEventListener("pointerup", (e) => e.stopPropagation());
     return btn;
+  }
+
+  // The two badges for one chapter row, with their tooltips (the chapter title
+  // isolated inside each sentence, so an RTL title cannot reorder it).
+  function makeChapterButtons(chapter) {
+    const title = chapter ? isolateRtl(chapter.title) : "";
+    const copyTip = chapter ? t("chapter.tip", { title }) : t("chapter.noTitleTip");
+    const srtTip = chapter ? t("srt.copyTip", { title }) : t("srt.noTitleTip");
+    return [
+      makeChapterBadge(CHAPTER_BTN_CLS, "📋", copyTip, (btn) => copyChapterRange(chapter, btn, "copy")),
+      makeChapterBadge(CHAPTER_SRT_BTN_CLS, "⏱", srtTip, (btn) => copyChapterRange(chapter, btn, "srt")),
+    ];
   }
 
   function injectChapterButtons() {
@@ -2725,35 +3478,44 @@
       if (!parseTimecode(txt) && !item.querySelector("#time")) continue;
       const chapter = matchChapter(chapters, item);
 
-      const existingBtn = item.querySelector(`.${CHAPTER_BTN_CLS}`);
-      if (existingBtn) {
+      // Both badges age together: they are built from the same chapter, so a
+      // row whose chapter changed rebuilds the pair, and a row that is still
+      // pointing at the right chapter keeps the pair it has.
+      const existingButtons = [
+        item.querySelector(`.${CHAPTER_BTN_CLS}`),
+        item.querySelector(`.${CHAPTER_SRT_BTN_CLS}`),
+      ].filter(Boolean);
+      if (existingButtons.length) {
         if (item.classList.contains(CHAPTER_HAS_BTN)) {
-          // YouTube may reuse the same DOM node for a different chapter;
-          // if the button now points at the wrong chapter, rebuild it.
-          const existingStart = existingBtn.dataset.start ? Number(existingBtn.dataset.start) : null;
+          // YouTube may reuse the same DOM node for a different chapter; if the
+          // buttons now point at the wrong chapter, rebuild them. A node reused
+          // across an in-page navigation can keep its buttons while describing
+          // a different chapter, so the title is compared too - a stale pair is
+          // rebuilt instead of copying the wrong range.
           const correctStart = chapter ? chapter.start : null;
-          // A node reused across an in-page navigation can keep its button
-          // while describing a different chapter; the title is compared too,
-          // so a stale button is rebuilt instead of copying the wrong range.
-          const existingTitle = existingBtn.dataset.title || "";
           const correctTitle = chapter ? chapter.title : "";
-          if (existingStart === correctStart && existingTitle === correctTitle) continue;
-          existingBtn.remove();
+          const current = (b) =>
+            (b.dataset.start ? Number(b.dataset.start) : null) === correctStart &&
+            (b.dataset.title || "") === correctTitle;
+          if (existingButtons.every(current)) continue;
+          existingButtons.forEach((b) => b.remove());
           item.classList.remove(CHAPTER_HAS_BTN);
         } else {
-          existingBtn.remove();
+          existingButtons.forEach((b) => b.remove());
         }
       }
 
-      const btn = makeChapterButton(item, chapter);
-      if (chapter) {
-        btn.dataset.start = String(chapter.start);
-        btn.dataset.title = chapter.title || "";
-      }
-      // Ensure relative positioning so the absolutely-positioned button stays put
+      const buttons = makeChapterButtons(chapter);
+      // Ensure relative positioning so the absolutely-positioned buttons stay put
       const cs = getComputedStyle(item);
       if (cs.position === "static") item.style.position = "relative";
-      item.appendChild(btn);
+      for (const b of buttons) {
+        if (chapter) {
+          b.dataset.start = String(chapter.start);
+          b.dataset.title = chapter.title || "";
+        }
+        item.appendChild(b);
+      }
       item.classList.add(CHAPTER_HAS_BTN);
     }
   }
@@ -2868,6 +3630,11 @@
   // =========================================================
   // MAIN BUTTON INJECTION ENGINE (No Reload Needed)
   // =========================================================
+  // The main control is a SPLIT button: the button itself copies the transcript,
+  // and the caret glued to its end opens the action menu, which is where the
+  // .srt download lives. They are wrapped so the page's own flex row lays them
+  // out as one control, and logical corner properties are used on both halves,
+  // so the split survives a watch page mirrored for RTL.
   function injectButton() {
     if (!window.location.pathname.startsWith("/watch")) return;
 
@@ -2881,25 +3648,41 @@
 
     if (target.querySelector(`#${BUTTON_ID}`)) return;
 
+    // A previous injection can be left over without its wrapper (a layout
+    // switch): both are cleared before the pair is rebuilt.
+    const oldWrap = document.getElementById(SPLIT_WRAP_ID);
+    if (oldWrap) oldWrap.remove();
     const oldBtn = document.getElementById(BUTTON_ID);
     if (oldBtn) oldBtn.remove();
 
     const isDarkMode = document.documentElement.hasAttribute("dark");
+    const edge = isDarkMode ? "rgba(255,255,255,0.2)" : "rgba(0,0,0,0.1)";
+    const bg = isDarkMode ? "#272727" : "#f2f2f2";
+    const fg = isDarkMode ? "#ffffff" : "#0f0f0f";
 
+    const wrap = document.createElement("div");
+    wrap.id = SPLIT_WRAP_ID;
+    wrap.className = "my-yt-split";
+
+    // The label and the remembered action are set together: the button says
+    // which operation its own click runs (`▾` beside it changes it).
+    const action = transcriptAction();
     const button = document.createElement("button");
     button.id = BUTTON_ID;
-    button.textContent = t("button.idle");
+    button.type = "button";
+    button.setAttribute("data-mode", action);
+    button.textContent = t(action === ACTION_SRT ? "button.idleSrt" : "button.idle");
     button.style.cssText = `
-      border: 1px solid ${isDarkMode ? "rgba(255,255,255,0.2)" : "rgba(0,0,0,0.1)"};
-      border-radius: 18px;
+      border: 1px solid ${edge};
+      border-start-start-radius: 18px;
+      border-end-start-radius: 18px;
       padding: 0 14px;
       height: 36px;
-      margin-inline-end: 8px;
       cursor: pointer;
       font-size: 14px;
       font-weight: 500;
-      background: ${isDarkMode ? "#272727" : "#f2f2f2"};
-      color: ${isDarkMode ? "#ffffff" : "#0f0f0f"};
+      background: ${bg};
+      color: ${fg};
       white-space: nowrap;
       display: inline-flex;
       align-items: center;
@@ -2907,8 +3690,359 @@
       flex-shrink: 0;
     `;
 
-    button.addEventListener("click", handleClick);
-    target.prepend(button);
+    const caret = document.createElement("button");
+    caret.id = CARET_ID;
+    caret.type = "button";
+    caret.className = "my-yt-caret";
+    caret.textContent = "▾";
+    caret.title = t("menu.tip");
+    caret.setAttribute("aria-label", t("menu.tip"));
+    caret.setAttribute("aria-haspopup", "true");
+    // The two halves read as one pill: the caret's inline-start edge has no
+    // border of its own (the button's inline-end border is the divider) and the
+    // radii are the button's, mirrored onto the caret's end corners.
+    caret.style.cssText = `
+      border: 1px solid ${edge};
+      border-inline-start: none;
+      border-start-end-radius: 18px;
+      border-end-end-radius: 18px;
+      padding: 0 9px;
+      height: 36px;
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 1;
+      background: ${bg};
+      color: ${fg};
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    `;
+
+    // The button's own click runs the remembered action, so a user who wants
+    // .srt files can take them with one click from then on (the caret menu is
+    // where that is chosen).
+    button.addEventListener("click", () => handleClick(transcriptAction()));
+    caret.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleMainMenu(caret);
+    });
+
+    wrap.append(button, caret);
+    target.prepend(wrap);
+  }
+
+  // =========================================================
+  // MAIN BUTTON ACTION MENU (the caret)
+  // =========================================================
+  // Two operations, one per item: copy the transcript, or save it as .srt. The
+  // panel is fixed-positioned against the caret, so it is not clipped by the
+  // page's own containers and does not scroll away with the header.
+  let menuCleanup = null;
+
+  function closeMainMenu() {
+    const menu = document.getElementById(MENU_ID);
+    if (menu) menu.remove();
+    if (menuCleanup) {
+      menuCleanup();
+      menuCleanup = null;
+    }
+  }
+
+  // Places a floating panel against its anchor, kept inside the viewport: below
+  // the anchor by default, or above it when `above` is set - the settings bubble
+  // opens upward, because the row it hangs from is the last thing in the
+  // description and there is no room under it.
+  function positionPanel(panel, anchor, above) {
+    const margin = 8;
+    const rect = anchor.getBoundingClientRect();
+    const width = panel.offsetWidth;
+    const height = panel.offsetHeight;
+    const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
+    const top = above ? rect.top - height - margin : rect.bottom + margin;
+    panel.style.left = left + "px";
+    panel.style.top = Math.max(margin, Math.min(top, window.innerHeight - height - margin)) + "px";
+  }
+
+  // Closes a panel on the next click anywhere else, on Escape, and on scroll -
+  // all three are armed a tick later, since the click that opened the panel is
+  // still bubbling towards the document when it is created.
+  function armPanelDismiss(panel, anchor, close) {
+    let live = true;
+    const onDocClick = (ev) => {
+      if (panel.contains(ev.target)) return;
+      if (anchor === ev.target || (anchor.contains && anchor.contains(ev.target))) return;
+      close();
+    };
+    const onKey = (ev) => {
+      if (ev.key === "Escape") close();
+    };
+    const onScroll = () => close();
+    setTimeout(() => {
+      if (!live) return;
+      document.addEventListener("click", onDocClick);
+      document.addEventListener("keydown", onKey);
+      window.addEventListener("scroll", onScroll, true);
+    }, 0);
+    return () => {
+      live = false;
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }
+
+  // Runs a whole-video operation chosen from the menu. A live chunk session is
+  // abandoned first: choosing an action in the menu is an explicit new decision
+  // about the transcript, so it must never be read as "continue the sequence".
+  function runMainAction(mode) {
+    const btn = document.getElementById(BUTTON_ID);
+    if (chunkSession) {
+      chunkSession = null;
+      resetMainButton(btn);
+    }
+    // The choice is remembered, so the button's own click repeats it. The
+    // attribute is what resetMainButton reads to put the right idle label back
+    // when the operation's flash ends; the preference is what the next page
+    // load reads to label the button it injects.
+    saveTranscriptOption(TEXT_ACTION_KEY, mode === ACTION_SRT ? ACTION_SRT : ACTION_COPY);
+    if (btn && typeof btn.setAttribute === "function") {
+      btn.setAttribute("data-mode", mode === ACTION_SRT ? ACTION_SRT : ACTION_COPY);
+    }
+    handleClick(mode);
+  }
+
+  function toggleMainMenu(anchor) {
+    if (document.getElementById(MENU_ID)) {
+      closeMainMenu();
+      return;
+    }
+    const menu = document.createElement("div");
+    menu.id = MENU_ID;
+    menu.className = "my-yt-menu";
+    menu.setAttribute("role", "menu");
+
+    // The item matching what the button is set to do carries a check mark and
+    // says so in words: the menu is also where that default is changed, so it
+    // has to show which of the two a plain click currently runs.
+    const current = transcriptAction();
+    const item = (mode, label, hint, run) => {
+      const el = document.createElement("button");
+      el.type = "button";
+      el.className = "my-yt-menu-item";
+      el.setAttribute("role", "menuitem");
+      const active = mode === current;
+      if (active) {
+        el.classList.add("my-yt-menu-active");
+        el.setAttribute("aria-current", "true");
+      }
+      const head = document.createElement("span");
+      head.className = "my-yt-menu-label";
+      head.textContent = (active ? "✓ " : "") + label;
+      el.appendChild(head);
+      if (hint) {
+        const sub = document.createElement("span");
+        sub.className = "my-yt-menu-hint";
+        sub.textContent = hint;
+        el.appendChild(sub);
+      }
+      if (active) {
+        const now = document.createElement("span");
+        now.className = "my-yt-menu-hint";
+        now.textContent = t("menu.current");
+        el.appendChild(now);
+      }
+      el.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeMainMenu();
+        run();
+      });
+      return el;
+    };
+
+    menu.append(
+      item(ACTION_COPY, t("menu.copy"), t("menu.remember"), () => runMainAction("copy")),
+      item(ACTION_SRT, t("menu.srt"), t("menu.srtHint"), () => runMainAction("srt"))
+    );
+    document.body.appendChild(menu);
+    positionPanel(menu, anchor, false);
+    menuCleanup = armPanelDismiss(menu, anchor, closeMainMenu);
+  }
+
+  // =========================================================
+  // SETTINGS BUBBLE (the description's action row)
+  // =========================================================
+  // The row holding YouTube's own "Show transcript" button, and, right beside it,
+  // the ⋮ menu whose single item is "Report". The bubble button is added to that
+  // row and its panel opens just ABOVE the row, so the settings sit with the
+  // transcript they are about instead of in a toolbar popup - and an anchor is
+  // found by the button YouTube itself renders, which no relayout or wording
+  // change to the ⋮ menu can invalidate.
+  let settingsCleanup = null;
+
+  function closeSettingsPopup() {
+    const popup = document.getElementById(SETTINGS_POPUP_ID);
+    if (popup) popup.remove();
+    if (settingsCleanup) {
+      settingsCleanup();
+      settingsCleanup = null;
+    }
+  }
+
+  function settingsAnchor() {
+    const native = findNativeTranscriptButton();
+    const row = native && native.parentElement;
+    if (!row) return null;
+    // YouTube's own ⋮ menu, so the panel can align to the control the user
+    // knows, rather than to the transcript button beside it.
+    let dots = null;
+    try {
+      dots = row.querySelector("ytd-menu-renderer button, button[aria-haspopup='true'], tp-yt-paper-icon-button");
+    } catch (e) {}
+    return { row, dots: dots || native };
+  }
+
+  function injectSettingsButton() {
+    if (!window.location.pathname.startsWith("/watch")) return;
+    const anchor = settingsAnchor();
+    if (!anchor) return;
+    const existing = document.getElementById(SETTINGS_BTN_ID);
+    // Already in this very row: nothing to do. Anywhere else (or detached) it is
+    // a leftover from a layout the page has since replaced.
+    if (existing && existing.parentElement === anchor.row) return;
+    if (existing) existing.remove();
+
+    const btn = document.createElement("button");
+    btn.id = SETTINGS_BTN_ID;
+    btn.type = "button";
+    btn.className = "my-yt-settings-btn";
+    btn.textContent = "⚙";
+    btn.title = t("settings.tip");
+    btn.setAttribute("aria-label", t("settings.tip"));
+    btn.setAttribute("aria-haspopup", "dialog");
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleSettingsPopup(btn);
+    });
+    anchor.row.appendChild(btn);
+  }
+
+  function toggleSettingsPopup(anchor) {
+    if (document.getElementById(SETTINGS_POPUP_ID)) {
+      closeSettingsPopup();
+      return;
+    }
+    const current = transcriptOptions();
+    const popup = document.createElement("div");
+    popup.id = SETTINGS_POPUP_ID;
+    popup.className = "my-yt-bubble";
+    popup.setAttribute("role", "dialog");
+    popup.setAttribute("aria-label", t("settings.title"));
+
+    const head = document.createElement("div");
+    head.className = "my-yt-bubble-head";
+    const title = document.createElement("span");
+    title.className = "my-yt-bubble-title";
+    title.textContent = t("settings.title");
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "my-yt-bubble-close";
+    close.textContent = "✕";
+    close.title = t("settings.close");
+    close.setAttribute("aria-label", t("settings.close"));
+    close.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSettingsPopup();
+    });
+    head.append(title, close);
+
+    // ---- include the video title ----
+    const titleRow = document.createElement("label");
+    titleRow.className = "my-yt-bubble-row";
+    const titleBox = document.createElement("input");
+    titleBox.type = "checkbox";
+    titleBox.checked = !!current.header;
+    titleBox.addEventListener("change", () =>
+      saveTranscriptOption(TEXT_TITLE_KEY, titleBox.checked ? "1" : "0")
+    );
+    const titleText = document.createElement("span");
+    titleText.className = "my-yt-bubble-label";
+    titleText.textContent = t("settings.includeTitle");
+    titleRow.append(titleBox, titleText);
+
+    const titleHint = document.createElement("div");
+    titleHint.className = "my-yt-bubble-hint";
+    titleHint.textContent = t("settings.includeTitleHint");
+
+    // One radio group: a title and one row per choice, each writing its own
+    // value under its own key. The format and the timestamp style are the same
+    // control twice, so they are built by the same code.
+    const choiceGroup = (titleKey, name, options, selected, prefKey) => {
+      const group = document.createElement("div");
+      group.className = "my-yt-bubble-group";
+      group.setAttribute("data-group", name);
+      const groupTitle = document.createElement("div");
+      groupTitle.className = "my-yt-bubble-grouptitle";
+      groupTitle.textContent = t(titleKey);
+      group.appendChild(groupTitle);
+      options.forEach((opt) => {
+        const row = document.createElement("label");
+        row.className = "my-yt-bubble-row";
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = name;
+        radio.value = opt.value;
+        radio.checked = selected === opt.value;
+        radio.addEventListener("change", () => {
+          if (radio.checked) saveTranscriptOption(prefKey, opt.value);
+        });
+        const text = document.createElement("span");
+        text.className = "my-yt-bubble-label";
+        text.textContent = t(opt.labelKey);
+        row.append(radio, text);
+        group.appendChild(row);
+      });
+      return group;
+    };
+
+    const formatGroup = choiceGroup(
+      "settings.formatGroup",
+      "ytxt-format",
+      [
+        { value: FORMAT_PARAGRAPH, labelKey: "settings.formatParagraph" },
+        { value: FORMAT_LINES, labelKey: "settings.formatLines" },
+      ],
+      current.format,
+      TEXT_FORMAT_KEY
+    );
+    // The timestamp style only shows a difference in the line-by-line format,
+    // which is exactly what its title says - the choice is still remembered while
+    // the paragraph format is selected, so switching back does not lose it.
+    const timeGroup = choiceGroup(
+      "settings.timeGroup",
+      "ytxt-time",
+      [
+        { value: TIME_BRACKET, labelKey: "settings.timeBracket" },
+        { value: TIME_PLAIN, labelKey: "settings.timePlain" },
+        { value: TIME_PAREN, labelKey: "settings.timeParen" },
+      ],
+      current.time,
+      TEXT_TIME_KEY
+    );
+
+    const note = document.createElement("div");
+    note.className = "my-yt-bubble-note";
+    note.textContent = t("settings.srtNote");
+
+    popup.append(head, titleRow, titleHint, formatGroup, timeGroup, note);
+    document.body.appendChild(popup);
+    // Aligned to the row's own ⋮ menu when it can be found, opened upward.
+    positionPanel(popup, (settingsAnchor() || {}).dots || anchor, true);
+    settingsCleanup = armPanelDismiss(popup, anchor, closeSettingsPopup);
   }
 
   // Chapter entries can appear at any time (description expand, opening the
@@ -2958,6 +4092,7 @@
     injectButton();
     injectChapterButtons();
     injectPlayerChapterButton();
+    injectSettingsButton();
   }, 400);
   let navRestartTimer = null;
   setupChapterObserver();
@@ -2966,6 +4101,11 @@
     // Invalidate as soon as the navigation begins, not when the new video is
     // ready: anything already in flight belongs to the video being left.
     navEpoch++;
+    // Both floating panels describe the video being left - the settings bubble
+    // can even be opened over the next video's layout - so they are closed with
+    // it rather than left pinned to a row that is about to be replaced.
+    closeMainMenu();
+    closeSettingsPopup();
     // Remember the transcript rows still on screen. They belong to the video
     // being left, and a scrape that runs before YouTube repopulates the panel
     // would otherwise read them as if they were the new video's.
@@ -2989,10 +4129,12 @@
       injectButton();
       injectChapterButtons();
       injectPlayerChapterButton();
+      injectSettingsButton();
       checkTimer = setInterval(() => {
         injectButton();
         injectChapterButtons();
         injectPlayerChapterButton();
+        injectSettingsButton();
       }, 400);
     }, 200);
   });

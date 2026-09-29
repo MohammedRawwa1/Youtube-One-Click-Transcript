@@ -1,5 +1,17 @@
-/* Main "Transcript" button (styles are mostly inline; this adds a hover touch) */
-#my-yt-transcript-button:hover {
+/* =========================================================
+   Main control: the split "Transcript" button + its caret
+   (the two halves are wrapped by injectButton; most of their
+   styling is inline, because it follows the page's theme)
+   ========================================================= */
+.my-yt-split {
+  display: inline-flex;
+  align-items: center;
+  margin-inline-end: 8px;
+  flex-shrink: 0;
+}
+
+#my-yt-transcript-button:hover,
+#my-yt-transcript-caret:hover {
   filter: brightness(0.94);
 }
 
@@ -9,10 +21,237 @@
 }
 
 /* =========================================================
+   The caret's action menu (copy transcript / download .srt)
+   Positioned fixed against the caret by positionPanel(), so
+   the page's own containers cannot clip it.
+   ========================================================= */
+#my-yt-transcript-menu {
+  position: fixed;
+  z-index: 2147483646;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 232px;
+  max-width: min(360px, calc(100vw - 16px));
+  padding: 6px;
+  background: #ffffff;
+  color: #0f0f0f;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+  font-family: Roboto, Arial, sans-serif;
+  text-align: start;
+}
+
+html[dark] #my-yt-transcript-menu {
+  background: #212121;
+  color: #f1f1f1;
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.6);
+}
+
+#my-yt-transcript-menu .my-yt-menu-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+#my-yt-transcript-menu .my-yt-menu-item:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+html[dark] #my-yt-transcript-menu .my-yt-menu-item:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+#my-yt-transcript-menu .my-yt-menu-label {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+#my-yt-transcript-menu .my-yt-menu-hint {
+  font-size: 11px;
+  line-height: 1.3;
+  opacity: 0.72;
+}
+
+/* The item the main button's own click currently runs: marked, and saying so -
+   the menu is also where that default is changed. */
+#my-yt-transcript-menu .my-yt-menu-item.my-yt-menu-active {
+  background: rgba(62, 166, 255, 0.12);
+}
+
+#my-yt-transcript-menu .my-yt-menu-item.my-yt-menu-active .my-yt-menu-label {
+  font-weight: 600;
+}
+
+html[dark] #my-yt-transcript-menu .my-yt-menu-item.my-yt-menu-active {
+  background: rgba(62, 166, 255, 0.22);
+}
+
+/* =========================================================
+   Settings: the bubble button in the description's action row
+   (beside YouTube's own "Show transcript" + ⋮ "Report") and the
+   bubble it opens just above that row
+   ========================================================= */
+#my-yt-settings-btn {
+  flex: none;
+  margin-inline-start: 8px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  color: inherit;
+  background: rgba(0, 0, 0, 0.06);
+  transition: background 0.12s ease;
+}
+
+#my-yt-settings-btn:hover {
+  background: rgba(0, 0, 0, 0.14);
+}
+
+html[dark] #my-yt-settings-btn {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+html[dark] #my-yt-settings-btn:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+#my-yt-settings-popup {
+  position: fixed;
+  z-index: 2147483646;
+  display: flex;
+  flex-direction: column;
+  width: min(340px, calc(100vw - 16px));
+  padding: 12px 14px;
+  background: #ffffff;
+  color: #0f0f0f;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+  font-family: Roboto, Arial, sans-serif;
+  font-size: 13px;
+  text-align: start;
+}
+
+html[dark] #my-yt-settings-popup {
+  background: #212121;
+  color: #f1f1f1;
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.6);
+}
+
+#my-yt-settings-popup .my-yt-bubble-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+#my-yt-settings-popup .my-yt-bubble-title {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+#my-yt-settings-popup .my-yt-bubble-close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+#my-yt-settings-popup .my-yt-bubble-close:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+html[dark] #my-yt-settings-popup .my-yt-bubble-close:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+#my-yt-settings-popup .my-yt-bubble-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+  line-height: 1.3;
+}
+
+#my-yt-settings-popup .my-yt-bubble-row input {
+  flex: none;
+  margin: 0;
+  accent-color: #3ea6ff;
+}
+
+#my-yt-settings-popup .my-yt-bubble-label {
+  flex: 1;
+}
+
+#my-yt-settings-popup .my-yt-bubble-hint,
+#my-yt-settings-popup .my-yt-bubble-note {
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: 0.72;
+}
+
+/* Logical, like every other offset in this file: the hint lines up under the
+   checkbox's text in a mirrored UI too. */
+#my-yt-settings-popup .my-yt-bubble-hint {
+  margin-inline-start: 24px;
+  margin-bottom: 8px;
+}
+
+#my-yt-settings-popup .my-yt-bubble-group {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+html[dark] #my-yt-settings-popup .my-yt-bubble-group {
+  border-top-color: rgba(255, 255, 255, 0.14);
+}
+
+#my-yt-settings-popup .my-yt-bubble-grouptitle {
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.8;
+  padding: 2px 0;
+}
+
+#my-yt-settings-popup .my-yt-bubble-note {
+  margin-top: 10px;
+}
+
+/* =========================================================
    Per-chapter "copy transcript" buttons
    Injected as the last child of each chapter row / card.
    ========================================================= */
-.my-yt-chapter-copy {
+.my-yt-chapter-copy,
+.my-yt-srt-copy {
   position: absolute;
   /* Logical, not physical: YouTube mirrors the whole watch layout for RTL
      languages, so a hard-coded `right` would park the badge on top of the
@@ -44,21 +283,34 @@
   transition: transform 0.12s ease, background 0.12s ease;
 }
 
-.my-yt-chapter-copy:hover {
+.my-yt-chapter-copy:hover,
+.my-yt-srt-copy:hover {
   transform: translateY(-50%) scale(1.15);
   background: rgba(0, 0, 0, 0.85);
 }
 
-.my-yt-chapter-copy:disabled {
+.my-yt-chapter-copy:disabled,
+.my-yt-srt-copy:disabled {
   cursor: wait;
   opacity: 0.75;
+}
+
+/* The second badge of a chapter row: the same chapter as SRT text (see
+   makeChapterSrtButton). It sits further in than the transcript badge, so the
+   two share the row's inline end - 6px inset, a 22px circle, 6px between them -
+   and the transcript badge, when a count widens it into a pill, pushes this one
+   further out by exactly its own width (reserveBadgeRoom does that, since CSS
+   cannot measure a sibling). */
+.my-yt-srt-copy {
+  inset-inline-end: 34px;
 }
 
 /* While a chunk session is driving the badge its label is an "n/N" count - and,
    from the second part on, the share of the transcript already copied - which
    does not fit a 22px circle. The class (added by setChunkLabel(), removed by
    resetMainButton()) grows the circle into a pill wide enough for the label. */
-.my-yt-chapter-copy.my-yt-chunking {
+.my-yt-chapter-copy.my-yt-chunking,
+.my-yt-srt-copy.my-yt-chunking {
   width: auto;
   min-width: 22px;
   padding: 0 6px;
@@ -88,22 +340,26 @@ ytd-macro-markers-list-item-renderer.my-yt-chapter-pill:not([layout*="VERTICAL"]
 
 /* Modern chapter cards are vertical (thumbnail on top), so anchor the
    button to the top-right corner of the thumbnail instead of the middle. */
-ytd-macro-markers-list-item-renderer[layout*="VERTICAL"] > .my-yt-chapter-copy {
+ytd-macro-markers-list-item-renderer[layout*="VERTICAL"] > .my-yt-chapter-copy,
+ytd-macro-markers-list-item-renderer[layout*="VERTICAL"] > .my-yt-srt-copy {
   top: 8px;
   transform: none;
 }
 
-ytd-macro-markers-list-item-renderer[layout*="VERTICAL"] > .my-yt-chapter-copy:hover {
+ytd-macro-markers-list-item-renderer[layout*="VERTICAL"] > .my-yt-chapter-copy:hover,
+ytd-macro-markers-list-item-renderer[layout*="VERTICAL"] > .my-yt-srt-copy:hover {
   transform: scale(1.15);
 }
 
 /* Slightly lighter badge on dark theme cards */
-html[dark] .my-yt-chapter-copy {
+html[dark] .my-yt-chapter-copy,
+html[dark] .my-yt-srt-copy {
   background: rgba(255, 255, 255, 0.22);
   color: #ffffff;
 }
 
-html[dark] .my-yt-chapter-copy:hover {
+html[dark] .my-yt-chapter-copy:hover,
+html[dark] .my-yt-srt-copy:hover {
   background: rgba(255, 255, 255, 0.32);
 }
 
